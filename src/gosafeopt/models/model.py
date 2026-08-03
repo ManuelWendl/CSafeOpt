@@ -69,7 +69,11 @@ class ModelGenerator:
                 if i > 0:
                     mean_module.constant = outcome_transform(torch.zeros(1, 1))[0]
                 else:
-                    mean_module.constant = outcome_transform.means[0]
+                    # mean_module operates in the standardized space Standardize maps
+                    # training data into, where the mean is 0 by construction -- not
+                    # outcome_transform.means (the raw-space mean), which is what large
+                    # reward ranges away from 0 previously biased this prior mean by.
+                    mean_module.constant = torch.zeros_like(outcome_transform.means[0])
 
             covar_module = ScaleKernel(gpytorch.kernels.MaternKernel(ard_num_dims=self.dim_input))
             covar_module.base_kernel.lengthscale = torch.tensor(self.lengthscale)

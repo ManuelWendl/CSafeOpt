@@ -15,7 +15,10 @@ class SafeUCB(BaseAquisition):
     ):
         super().__init__(dim_obs, scale_beta, beta, context)
 
-    def evaluate(self, x: Tensor):
+    def is_internal_step(self, step: int = 0) -> bool:  # noqa: ARG002
+        return False
+
+    def evaluate(self, x: Tensor, step: int = 0):  # noqa: ARG002
         posterior = self.model_posterior(x)
         l, u = self.get_confidence_interval(posterior)  # noqa: E741
         values = u[:, 0]

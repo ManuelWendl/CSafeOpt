@@ -1,10 +1,8 @@
-# Tuning Legged Locomotion Controllers via Safe Bayesian Optimization
+# Cumulative SafeOpt -- No Regret Safe Bayesian Optimization
 
 ![Bayesian Optimization animation](/doc/animation.gif?raw=true "Bayesian optimization animation")
 
-This repository contains the code for our paper [Tuning Legged Locomotion Controllers via Safe Bayesian Optimization](https://arxiv.org/abs/2306.07092). A demo video is available at [https://www.youtube.com/watch?v=pceHWpFr3ng](https://www.youtube.com/watch?v=zDBouUgegrU).
-
-All relevant code for the paper is in `gosafeopt/aquisitions/*`, `gosafeopt/models/__init__.py`, `gosafeopt/optim/swarm_opt.py` and `gosafeopt/optim/base_optimizer.py`.
+This repository contains the code for the gated exploration mechanism CumSafeOpt. 
 
 ## Setup
 
@@ -22,9 +20,9 @@ It might be necessary to create a wandb account at wandb.ai if not already exist
 
 ## Examples
 
-To train the pendulum toy problem model with a specific aquisition function and show the result plot run
+To master the mars exploration problem with the gated aquisition function and comparison to all baselines, run the following commands:
 
 ```
 poetry install --with examples
-python examples/pendulum.py
+python examples/mars_demo.py
 ```

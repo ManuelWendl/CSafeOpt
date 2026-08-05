@@ -45,6 +45,7 @@ import numpy as np
 import pandas as pd
 import torch
 import typer
+from matplotlib.animation import FuncAnimation, PillowWriter
 from botorch.models.gp_regression import SingleTaskGP
 from tueplots import figsizes
 from bottleneck_demo import (
@@ -102,7 +103,7 @@ _elevation_spline = RectBivariateSpline(_xs_grid, _ys_grid, _dtm)
 # spline itself is still fit over the full 120x70 grid (_xs_grid/_ys_grid).
 DOMAIN_X = (20.0 * PIXEL_STEP, 70.0 * PIXEL_STEP)
 DOMAIN_Y = (8.0 * PIXEL_STEP, 68.0 * PIXEL_STEP)
-SEED = (65 * PIXEL_STEP, 60 * PIXEL_STEP)  # 1px from SafeMDP's own start node (comfortable margin at 20deg)
+SEED = (65 * PIXEL_STEP, 60 * PIXEL_STEP)  # 1px from SafeMDP's own start node (comfortable margin at 27deg)
 # Real, BFS-verified safe outcrop ~50m away whose *straight-line* path from
 # SEED is firmly blocked (constraint margin -0.44) by real terrain, while a
 # real detour (~1.4x the direct distance) exists -- reaching it requires
@@ -274,7 +275,7 @@ CONFIG = {
     "SafeOpt": {"scale_beta": 1.0, "beta": 9},
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
     # "CumSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.2, "alpha": 0.7, "zeta": 0.001},
-    "CumSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.15, "alpha": 0.5, "zeta": 0.001},
+    "CumSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.15, "alpha": 0.65, "zeta": 0.0},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
     "Goose": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1.0, "epsilon": 0.2},
 }
@@ -482,7 +483,8 @@ def plot_mars(results: dict, out_path: str):
 
     ax_terrain.scatter(*SEED, marker="*", s=90, color="black", zorder=5, label="landing site")
     ax_terrain.scatter(*TARGET, marker="P", s=90, color="black", zorder=5, label="target outcrop")
-    ax_terrain.set_title("Real Mars terrain: elevation + slope $>20°$ (unsafe)")
+    slope_limit_deg = np.rad2deg(np.arctan(SLOPE_LIMIT))
+    ax_terrain.set_title(rf"Real Mars terrain: elevation + slope $>{slope_limit_deg:.0f}°$ (unsafe)")
     ax_terrain.legend(loc="upper left", fontsize=6, frameon=False)
 
     # --- trace (sampled points overlaid on the same terrain) ---------------
@@ -546,6 +548,118 @@ def plot_mars(results: dict, out_path: str):
     print(f"Saved Mars benchmark plot to {out_path} (and {pdf_path})")
 
 
+def animate_mars(results: dict, out_path: str, n_frames: int = 60, fps: int = 8, dpi: int = 200):
+    """Same 2x2 layout as plot_mars, animated so each round's sample appears
+    incrementally across all four panels at once (terrain trace, cumulative
+    regret, and eta_t all advance in lockstep) rather than showing only the
+    final state. Axis limits are fixed up front from the *final* data so the
+    animation reveals points/lines within a static frame instead of the axes
+    rescaling every frame, which would otherwise make progress hard to read.
+    """
+    _apply_theme()
+
+    names = list(results.keys())
+    style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
+    j_star = true_optimum()
+
+    fig, ((ax_terrain, ax_trace), (ax_regret, ax_threshold)) = plt.subplots(2, 2)
+
+    # --- terrain backgrounds (static, drawn once) ---------------------------
+    xs = np.linspace(*DOMAIN_X, _rows * 2)
+    ys = np.linspace(*DOMAIN_Y, _cols * 2)
+    X, Y = np.meshgrid(xs, ys)
+    Z = elevation(X, Y)
+    C = constraint_fn(X, Y)
+
+    for ax in (ax_terrain, ax_trace):
+        ax.contourf(X, Y, Z, levels=20, cmap="Greys", alpha=0.5)
+        ax.contourf(X, Y, C, levels=[-100.0, 0.0], colors=["#CC503E"], alpha=0.35)
+        ax.set_xlim(*DOMAIN_X)
+        ax.set_ylim(*DOMAIN_Y)
+        ax.set_xlabel(r"$x$ [m]")
+        ax.set_ylabel(r"$y$ [m]")
+
+    ax_terrain.scatter(*SEED, marker="*", s=90, color="black", zorder=5, label="landing site")
+    ax_terrain.scatter(*TARGET, marker="P", s=90, color="black", zorder=5, label="target outcrop")
+    slope_limit_deg = np.rad2deg(np.arctan(SLOPE_LIMIT))
+    ax_terrain.set_title(rf"Real Mars terrain: elevation + slope $>{slope_limit_deg:.0f}°$ (unsafe)")
+    ax_terrain.legend(loc="upper left", fontsize=6, frameon=False)
+
+    ax_trace.set_title("Points evaluated")
+    _legend(ax_trace, names, style, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, fontsize=6)
+
+    # --- precompute each panel's full curves once, animate by masking -------
+    regret_curves = {n: np.cumsum(j_star - data.train_y[:, 0].numpy()) for n, (data, _aq) in results.items()}
+
+    threshold_curves = {}
+    for n, (_data, aquisition) in results.items():
+        history = getattr(aquisition, "threshold_history", None)
+        if history:
+            rounds_h, _tau_h, eta_h = zip(*history)
+            threshold_curves[n] = (np.array(rounds_h), np.array(eta_h))
+
+    max_round = max(data.train_x.shape[0] for data, _aq in results.values())
+    frame_rounds = sorted(set(np.linspace(1, max_round, min(n_frames, max_round)).astype(int)))
+
+    trace_artists = {
+        n: ax_trace.scatter([], [], s=10, color=style[n][0], marker=style[n][1], alpha=0.85, linewidths=0.3, edgecolors="white")
+        for n in names
+    }
+    regret_lines = {n: ax_regret.plot([], [], color=style[n][0], linewidth=1.8)[0] for n in names}
+    threshold_lines = {n: ax_threshold.plot([], [], color=style[n][0], linewidth=1.8)[0] for n in threshold_curves}
+
+    ax_regret.set_xlim(0, max_round)
+    ax_regret.set_ylim(0, max(curve.max() for curve in regret_curves.values()) * 1.05)
+    ax_regret.set_xlabel("round")
+    ax_regret.set_ylabel(r"cumulative regret $R_N$")
+    ax_regret.set_title(rf"$R_N = \sum_t (J^\star - f(x_t))$, $J^\star = {j_star:.3f}$")
+    _legend(ax_regret, names, style)
+
+    ax_threshold.set_xlabel("round")
+    ax_threshold.set_ylabel(r"$\eta_t$")
+    ax_threshold.set_title(r"$\eta_t = 2\varepsilon\,\beta_t^{1/2-\alpha}$")
+    if threshold_curves:
+        all_rounds = np.concatenate([r for r, _e in threshold_curves.values()])
+        all_eta = np.concatenate([e for _r, e in threshold_curves.values()])
+        ax_threshold.set_xlim(all_rounds.min(), max_round)
+        pad = 0.05 * (all_eta.max() - all_eta.min() + 1e-12)
+        ax_threshold.set_ylim(all_eta.min() - pad, all_eta.max() + pad)
+        _legend(ax_threshold, list(threshold_curves.keys()), style)
+
+    for ax in fig.get_axes():
+        _style_axis(ax)
+
+    round_text = fig.suptitle("")
+
+    def update(frame_idx):
+        r = frame_rounds[frame_idx]
+        artists = []
+        for n in names:
+            data, _aq = results[n]
+            k = min(r, data.train_x.shape[0])
+            trace_artists[n].set_offsets(data.train_x[:k, :2].numpy())
+            artists.append(trace_artists[n])
+
+            k_r = min(r, len(regret_curves[n]))
+            regret_lines[n].set_data(np.arange(k_r), regret_curves[n][:k_r])
+            artists.append(regret_lines[n])
+
+            if n in threshold_curves:
+                rounds_h, eta_h = threshold_curves[n]
+                mask = rounds_h <= r
+                threshold_lines[n].set_data(rounds_h[mask], eta_h[mask])
+                artists.append(threshold_lines[n])
+
+        round_text.set_text(f"round {r}/{max_round}")
+        artists.append(round_text)
+        return artists
+
+    ani = FuncAnimation(fig, update, frames=len(frame_rounds), blit=False)
+    ani.save(out_path, writer=PillowWriter(fps=fps), dpi=dpi)
+    plt.close(fig)
+    print(f"Saved Mars animation to {out_path}")
+
+
 def _print_summary(name: str, data, j_star: float):
     xs = data.train_x[:, 0].numpy()
     ys = data.train_x[:, 1].numpy()
@@ -561,17 +675,22 @@ def _print_summary(name: str, data, j_star: float):
 
 @app.command()
 def mars(
-    n_opt_samples: int = typer.Option(350, help="Number of BO rounds for every run"),
+    n_opt_samples: int = typer.Option(500, help="Number of BO rounds for every run"),
     seed: int = typer.Option(42, help="RNG seed shared by every run"),
     algorithms: List[str] = typer.Option(
-        ["SafeOpt", "SafeUCB", "CumSafeOpt", "GoSafeOpt", "Goose"], help="Which acquisitions to run"
-        # ["CumSafeOpt"], help="Which acquisitions to run"
+        # ["SafeOpt", "SafeUCB", "CumSafeOpt", "GoSafeOpt", "Goose"], help="Which acquisitions to run"
+        ["CumSafeOpt"], help="Which acquisitions to run"
     ),
     out: str = f"{Path().absolute()}/examples/mars.png",
+    gif: bool = typer.Option(False, help="Also render an animated GIF showing samples appearing round by round"),
+    gif_frames: int = typer.Option(60, help="Number of frames in the GIF (rounds are subsampled to this count)"),
+    gif_fps: int = typer.Option(8, help="Playback speed of the GIF"),
+    gif_dpi: int = typer.Option(200, help="Resolution of the GIF (figure is a fixed 5.5x3.4in, so this sets pixel size)"),
 ):
     Logger.set_verbosity(2)
     j_star = true_optimum()
-    print(f"true optimum J*={j_star:.3f}, safety threshold tan(20deg)={SLOPE_LIMIT:.3f}")
+    slope_limit_deg = np.rad2deg(np.arctan(SLOPE_LIMIT))
+    print(f"true optimum J*={j_star:.3f}, safety threshold tan({slope_limit_deg:.0f}deg)={SLOPE_LIMIT:.3f}")
 
     results = {}
     for name in algorithms:
@@ -580,6 +699,10 @@ def mars(
         _print_summary(name, data, j_star)
 
     plot_mars(results, out)
+
+    if gif:
+        gif_out = str(Path(out).with_suffix(".gif"))
+        animate_mars(results, gif_out, n_frames=gif_frames, fps=gif_fps, dpi=gif_dpi)
 
 
 @app.command()

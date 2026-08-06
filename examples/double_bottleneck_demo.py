@@ -9,7 +9,7 @@ sterner test of whether a given alpha schedule shrinks fast enough to reach
 the full comparator class in a fixed round budget (Section 6.5 of the
 write-up). Reuses the landscape-agnostic infrastructure (paper-style
 plotting, the Chowdhury-Gopalan confidence sequence, the instrumented
-CumSafeOpt) directly from bottleneck_demo.py rather than duplicating it.
+CSafeOpt) directly from bottleneck_demo.py rather than duplicating it.
 """
 
 import math
@@ -34,7 +34,7 @@ from bottleneck_demo import (
     GrowingGoSafeOpt,
     GrowingSafeOpt,
     GrowingSafeUCB,
-    InstrumentedCumSafeOpt,
+    InstrumentedCSafeOpt,
     _apply_theme,
     _legend,
     _plot_series,
@@ -128,7 +128,7 @@ CONFIG = {
     },
     "SafeOpt": {"scale_beta": 1.0, "beta": 9},
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
-    "CumSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.06, "alpha": 0.55, "zeta": 0.01},
+    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.06, "alpha": 0.55, "zeta": 0.01},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
     # lipschitz=2.0 safely bounds constraint_fn's true max slope (~1.2, from the
     # narrower width-0.45 bump at the final peak plus the dip term).
@@ -141,11 +141,11 @@ def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float]
         return GrowingSafeOpt(**CONFIG["SafeOpt"], dim_obs=dim_obs)
     elif name == "SafeUCB":
         return GrowingSafeUCB(**CONFIG["SafeUCB"], dim_obs=dim_obs)
-    elif name == "CumSafeOpt":
-        kwargs = dict(CONFIG["CumSafeOpt"])
+    elif name == "CSafeOpt":
+        kwargs = dict(CONFIG["CSafeOpt"])
         if alpha is not None:
             kwargs["alpha"] = alpha
-        return InstrumentedCumSafeOpt(**kwargs, dim_obs=dim_obs)
+        return InstrumentedCSafeOpt(**kwargs, dim_obs=dim_obs)
     elif name == "GoSafeOpt":
         return GrowingGoSafeOpt(**CONFIG["GoSafeOpt"], dim_obs=dim_obs, data=data)
     elif name == "Goose":
@@ -417,7 +417,7 @@ def bottleneck(
     n_opt_samples: int = typer.Option(100, help="Number of BO rounds for every run"),
     seed: int = typer.Option(42, help="RNG seed shared by every run"),
     algorithms: List[str] = typer.Option(
-        ["SafeOpt", "SafeUCB", "CumSafeOpt", "GoSafeOpt", "Goose"], help="Which acquisitions to run"
+        ["SafeOpt", "SafeUCB", "CSafeOpt", "GoSafeOpt", "Goose"], help="Which acquisitions to run"
     ),
     out: str = f"{Path().absolute()}/examples/double_bottleneck.png",
 ):
@@ -437,10 +437,10 @@ def bottleneck(
 def alpha_ablation(
     n_opt_samples: int = typer.Option(100, help="Number of BO rounds for every run"),
     seed: int = typer.Option(42, help="RNG seed shared by every run"),
-    alphas: List[float] = typer.Option([0.5, 0.6, 0.7, 0.75, 0.8, 1], help="alpha values to compare for CumSafeOpt"),
+    alphas: List[float] = typer.Option([0.5, 0.6, 0.7, 0.75, 0.8, 1], help="alpha values to compare for CSafeOpt"),
     out: str = f"{Path().absolute()}/examples/double_bottleneck_alpha_ablation.png",
 ):
-    """Same benchmark, same figure, but comparing CumSafeOpt at different alpha instead of different algorithms."""
+    """Same benchmark, same figure, but comparing CSafeOpt at different alpha instead of different algorithms."""
     Logger.set_verbosity(2)
     j_star = true_optimum()
 
@@ -448,7 +448,7 @@ def alpha_ablation(
     for a in alphas:
         plain_name = f"alpha={a:g}"
         name = rf"$\alpha={a:g}$"
-        data, aquisition = run("CumSafeOpt", seed, n_opt_samples, alpha=a)
+        data, aquisition = run("CSafeOpt", seed, n_opt_samples, alpha=a)
         results[name] = (data, aquisition)
         _print_summary(plain_name, data, j_star)
 
@@ -464,7 +464,7 @@ def nbar(
     (Lemma 5's information-gain budget): the worst-case number of rounds guaranteed to
     contain a round that already certified a point within that bottleneck's margin,
     regardless of which algorithm or points were actually chosen. Uses the exact same
-    kernel/lengthscale/noise CONFIG uses, and CumSafeOpt's own rkhs_bound/noise_proxy/delta.
+    kernel/lengthscale/noise CONFIG uses, and CSafeOpt's own rkhs_bound/noise_proxy/delta.
     gamma_n is computed exactly up to n_direct via greedy (near-optimal) selection, then
     extrapolated with the Matern-5/2-in-1D asymptotic rate for any larger n the solve needs.
     """
@@ -475,7 +475,7 @@ def nbar(
     covar.base_kernel.lengthscale = torch.tensor(CONFIG["model"]["lenghtscale"])
     C_lambda = 2.0 / math.log(1.0 + 1.0 / lam)
 
-    probe = build_aquisition("CumSafeOpt", CONFIG["dim_obs"], Data())
+    probe = build_aquisition("CSafeOpt", CONFIG["dim_obs"], Data())
     rkhs_bound, noise_proxy, delta = probe.rkhs_bound, probe.noise_proxy, probe.delta
 
     def beta_fn(gamma: float) -> float:

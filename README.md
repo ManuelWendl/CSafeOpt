@@ -2,7 +2,7 @@
 
 ![Bayesian Optimization animation](/doc/animation.gif?raw=true "Bayesian optimization animation")
 
-This repository contains the code for the gated exploration mechanism CumSafeOpt. 
+This repository contains the code for the gated exploration mechanism CSafeOpt. 
 
 ## Setup
 

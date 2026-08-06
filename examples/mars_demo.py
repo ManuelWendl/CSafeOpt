@@ -55,7 +55,7 @@ from bottleneck_demo import (
     GrowingGoSafeOpt,
     GrowingSafeOpt,
     GrowingSafeUCB,
-    InstrumentedCumSafeOpt,
+    InstrumentedCSafeOpt,
     _apply_theme,
     _legend,
     _plot_series,
@@ -147,7 +147,7 @@ def reward_fn(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     # the direct route the gradient points along is blocked by a firm real
     # safety violation (see TARGET comment): SafeUCB has no mechanism to
     # deliberately resolve uncertainty at that boundary and reduce to
-    # tolerating the violation via soft_penalty, while SafeOpt/CumSafeOpt/
+    # tolerating the violation via soft_penalty, while SafeOpt/CSafeOpt/
     # GoSafeOpt/GOOSE actively learn about the safe detour around it.
     return (
         1.0 * np.exp(-(((x - SEED[0]) ** 2 + (y - SEED[1]) ** 2)) / (2 * 8.0**2))
@@ -271,21 +271,21 @@ CONFIG = {
     # matrix each round), so it keeps the base set_size above. The other four
     # acquisitions are O(set_size) and benefit a lot from denser candidate
     # coverage of the (already-tightened) safe corridor -- see SET_SIZE_OVERRIDES.
-    "SET_SIZE_OVERRIDES": {"SafeOpt": 24000, "SafeUCB": 24000, "CumSafeOpt": 24000, "GoSafeOpt": 24000},
+    "SET_SIZE_OVERRIDES": {"SafeOpt": 24000, "SafeUCB": 24000, "CSafeOpt": 24000, "GoSafeOpt": 24000},
     "SafeOpt": {"scale_beta": 1.0, "beta": 9},
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
-    # "CumSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.2, "alpha": 0.7, "zeta": 0.001},
-    "CumSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.15, "alpha": 0.65, "zeta": 0.0},
+    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.2, "alpha": 0.7, "zeta": 0.001},
+    #"CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.15, "alpha": 0.65, "zeta": 0.001},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
     "Goose": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1.0, "epsilon": 0.2},
 }
 
 
-class GateTrackingCumSafeOpt(InstrumentedCumSafeOpt):
+class GateTrackingCSafeOpt(InstrumentedCSafeOpt):
     """Records whether the *actual chosen point* each round came from the gate or from plain UCB.
 
     Some candidate clearing `std > tau_t` doesn't necessarily mean the point
-    CumSafeOpt actually picks needed the gate: what matters is whether the
+    CSafeOpt actually picks needed the gate: what matters is whether the
     *argmax* of the full acquisition `ut + kappa*normalized_gate` has a
     nonzero gate term. Lemma 2's dominance property (see cum_safe_opt.py)
     means the point achieving normalized_gate=1 (the single most-uncertain
@@ -294,7 +294,7 @@ class GateTrackingCumSafeOpt(InstrumentedCumSafeOpt):
     guaranteed to win over a plain-UCB point with a high enough ut of its
     own, so which one actually wins is not fully determined by the count of
     gate-active candidates alone. This checks the winner directly rather
-    than relying on that argument: it replicates CumSafeOpt.evaluate()'s
+    than relying on that argument: it replicates CSafeOpt.evaluate()'s
     computation locally (once, not calling it twice), finds the argmax
     itself, and records normalized_gate at that specific point -- exactly 0
     when plain UCB determined the choice, and how close to 1 the winning
@@ -377,11 +377,11 @@ def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float]
         return GrowingSafeOpt(**CONFIG["SafeOpt"], dim_obs=dim_obs)
     elif name == "SafeUCB":
         return GrowingSafeUCB(**CONFIG["SafeUCB"], dim_obs=dim_obs)
-    elif name == "CumSafeOpt":
-        kwargs = dict(CONFIG["CumSafeOpt"])
+    elif name == "CSafeOpt":
+        kwargs = dict(CONFIG["CSafeOpt"])
         if alpha is not None:
             kwargs["alpha"] = alpha
-        return InstrumentedCumSafeOpt(**kwargs, dim_obs=dim_obs)
+        return InstrumentedCSafeOpt(**kwargs, dim_obs=dim_obs)
     elif name == "GoSafeOpt":
         return GrowingGoSafeOpt(**CONFIG["GoSafeOpt"], dim_obs=dim_obs, data=data)
     elif name == "Goose":
@@ -497,7 +497,7 @@ def plot_mars(results: dict, out_path: str):
             xs_n, ys_n, s=10, color=color, marker=marker, label=n, alpha=0.85, linewidths=0.3, edgecolors="white"
         )
     ax_trace.set_title("Points evaluated (all rounds)")
-    _legend(ax_trace, names, style, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, fontsize=6)
+    _legend(ax_trace, names, style, loc="upper center", bbox_to_anchor=(0.5, 0.3), ncol=3, fontsize=6)
 
     # --- cumulative regret ---------------------------------------------------
     regret_df = pd.concat(
@@ -586,7 +586,7 @@ def animate_mars(results: dict, out_path: str, n_frames: int = 60, fps: int = 8,
     ax_terrain.legend(loc="upper left", fontsize=6, frameon=False)
 
     ax_trace.set_title("Points evaluated")
-    _legend(ax_trace, names, style, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, fontsize=6)
+    _legend(ax_trace, names, style, loc="upper center", bbox_to_anchor=(0.5, 0.3), ncol=3, fontsize=6)
 
     # --- precompute each panel's full curves once, animate by masking -------
     regret_curves = {n: np.cumsum(j_star - data.train_y[:, 0].numpy()) for n, (data, _aq) in results.items()}
@@ -675,11 +675,11 @@ def _print_summary(name: str, data, j_star: float):
 
 @app.command()
 def mars(
-    n_opt_samples: int = typer.Option(500, help="Number of BO rounds for every run"),
+    n_opt_samples: int = typer.Option(600, help="Number of BO rounds for every run"),
     seed: int = typer.Option(42, help="RNG seed shared by every run"),
     algorithms: List[str] = typer.Option(
-        # ["SafeOpt", "SafeUCB", "CumSafeOpt", "GoSafeOpt", "Goose"], help="Which acquisitions to run"
-        ["CumSafeOpt"], help="Which acquisitions to run"
+        ["SafeOpt", "SafeUCB", "CSafeOpt", "Goose"], help="Which acquisitions to run"
+        # ["CSafeOpt"], help="Which acquisitions to run"
     ),
     out: str = f"{Path().absolute()}/examples/mars.png",
     gif: bool = typer.Option(False, help="Also render an animated GIF showing samples appearing round by round"),
@@ -711,12 +711,12 @@ def gate_activity(
     seed: int = typer.Option(42, help="RNG seed"),
     out: str = f"{Path().absolute()}/examples/mars_gate_activity.png",
 ):
-    """Run CumSafeOpt alone and mark whether each round's chosen point came from the gate or plain UCB.
+    """Run CSafeOpt alone and mark whether each round's chosen point came from the gate or plain UCB.
 
     Separate from the main `mars` comparison, matching bottleneck_demo.py's
     alpha_ablation. Some candidate having std above tau_t (eq. 29) doesn't
     guarantee the *winning* point actually needed the gate -- see
-    GateTrackingCumSafeOpt's docstring. This command checks the argmax
+    GateTrackingCSafeOpt's docstring. This command checks the argmax
     directly every round and shades the cumulative regret and eta_t plots by
     normalized_gate at the chosen point: 0 (no shading) when plain UCB
     determined the choice, darker green the more the winning point's own
@@ -725,8 +725,8 @@ def gate_activity(
     Logger.set_verbosity(2)
     j_star = true_optimum()
 
-    aquisition = GateTrackingCumSafeOpt(**CONFIG["CumSafeOpt"], dim_obs=CONFIG["dim_obs"])
-    data, aquisition = run("CumSafeOpt", seed, n_opt_samples, aquisition_override=aquisition)
+    aquisition = GateTrackingCSafeOpt(**CONFIG["CSafeOpt"], dim_obs=CONFIG["dim_obs"])
+    data, aquisition = run("CSafeOpt", seed, n_opt_samples, aquisition_override=aquisition)
 
     gate_history = aquisition.gate_history
     n_gate_used = sum(1 for _, strength in gate_history if strength > 0.0)
@@ -749,7 +749,7 @@ def gate_activity(
     # 1x2 row, so it needs its own (wider, shorter) size rather than inheriting
     # a height-to-width ratio meant for a 4-panel figure.
     plt.rcParams.update(figsizes.iclr2023(nrows=1, ncols=2))
-    name = "CumSafeOpt"
+    name = "CSafeOpt"
     style = {name: (PALETTE[0], MARKERS[0])}
 
     fig, (ax_regret, ax_threshold) = plt.subplots(1, 2)

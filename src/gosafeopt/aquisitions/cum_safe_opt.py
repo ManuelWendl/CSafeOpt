@@ -8,11 +8,11 @@ from torch import Tensor
 from gosafeopt.aquisitions.base_aquisition import BaseAquisition
 
 
-class CumSafeOpt(BaseAquisition):
+class CSafeOpt(BaseAquisition):
     """Cumulative Safe Opt: safe GP-UCB gated by a shrinking expansion bonus.
 
     Implements the single scalar acquisition A_t(x) = u_t(x) + kappa_t *
-    qbar_t(x) from "Comulative Safe Opt" (Wendl, 2026). The gate qbar_t is
+    qbar_t(x) from "Cumulative Safe Opt" (Wendl, 2026). The gate qbar_t is
     the normalized, thresholded posterior standard deviation of safe points;
     its support is exactly the safe points whose uncertainty exceeds
     tau_t = epsilon / beta_t ** alpha. Whenever an active gate exists it

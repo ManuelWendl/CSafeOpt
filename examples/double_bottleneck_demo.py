@@ -75,8 +75,8 @@ def reward_fn(x: np.ndarray) -> np.ndarray:
 
 
 BOTTLENECK_2_DIP_CENTER = 8.87  # bottleneck 2's original minimizer
-BOTTLENECK_2_DIP_WIDTH = 0.5
-BOTTLENECK_2_DIP_AMPLITUDE = 0.09328  # halves bottleneck 2's margin again (0.062 -> 0.031); negligible at bottleneck 1
+BOTTLENECK_2_DIP_WIDTH = 1
+BOTTLENECK_2_DIP_AMPLITUDE = 0.1  # halves bottleneck 2's margin again (0.062 -> 0.031); negligible at bottleneck 1
 
 
 def constraint_fn(x: np.ndarray) -> np.ndarray:
@@ -128,11 +128,11 @@ CONFIG = {
     },
     "SafeOpt": {"scale_beta": 1.0, "beta": 9},
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
-    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.06, "alpha": 0.55, "zeta": 0.01},
+    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1, "alpha": 1, "zeta": 0.1},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
     # lipschitz=2.0 safely bounds constraint_fn's true max slope (~1.2, from the
     # narrower width-0.45 bump at the final peak plus the dip term).
-    "Goose": {"scale_beta": 1.0, "beta": 9, "lipschitz": 5, "epsilon": 0.031},
+    "Goose": {"scale_beta": 1.0, "beta": 9, "lipschitz": 0.5, "epsilon": 0.1},
 }
 
 

@@ -63,10 +63,21 @@ class Goose(BaseAquisition):
         l, u = self.get_confidence_interval(posterior)  # noqa: E741
 
         safe = torch.all(l[:, 1:] > self.fmin[1:], axis=1)  # type: ignore  # S_t^p
-        optimistic_safe = torch.all(u[:, 1:] > self.fmin[1:], axis=1)  # type: ignore  # one-hop S_t^{o,eps}
+        # one-hop S_t^{o,eps} (eq. 2): needs the same epsilon slack the expansion
+        # certifier below uses, or points can be "optimistically safe" by less
+        # than the accuracy GOOSE is willing to certify to.
+        optimistic_safe = torch.all(u[:, 1:] > self.fmin[1:] + self.epsilon, axis=1)  # type: ignore
 
         slack = l - self.fmin
-        ut = u[:, 0] + self.soft_penalty(slack)
+        # ut is only ever handed to the outer optimizer's argmax as a fallback:
+        # line 10's "evaluate x*_i" once it's *already confirmed* pessimistically
+        # safe, or graceful degradation in _safe_expansion_scores below when
+        # nothing is left to expand toward. soft_penalty alone doesn't guarantee
+        # it dominates a barely-unsafe point with a high reward UCB, so mask it
+        # to -1e10 outside the safe set -- matching how oracle_scores below is
+        # already masked to optimistic_safe -- to keep every fallback confined
+        # to points already certified safe.
+        ut = torch.where(safe, u[:, 0] + self.soft_penalty(slack), torch.full_like(u[:, 0], -1e10))
 
         # Oracle (line 4): plain GP-UCB on the objective, ignorant of safety -- the
         # paper's "unsafe IML algorithm" -- restricted only to the optimistic safe

@@ -130,6 +130,30 @@ def _plot_series(ax, df, x, y, names, style, linewidth=1.8, pointsize=4.0, edgew
     ).on(ax).plot()
 
 
+def _legend_order(names: list, first: str = "CSafeOpt") -> list:
+    """`names` with `first` moved to the front.
+
+    The order legends and color/marker assignment (style dicts) should use,
+    so CSafeOpt reads first and gets PALETTE[0].
+    """
+    if first not in names:
+        return list(names)
+    return [first] + [n for n in names if n != first]
+
+
+def _draw_order(names: list, last: str = "CSafeOpt") -> list:
+    """`names` with `last` moved to the end.
+
+    _plot_series draws/z-orders series in the order given (so.Nominal's
+    `order=` controls draw sequence, confirmed empirically: later entries
+    render on top) -- pass this, not _legend_order's result, to _plot_series
+    so CSafeOpt is legend-first but drawn on top.
+    """
+    if last not in names:
+        return list(names)
+    return [n for n in names if n != last] + [last]
+
+
 def reward_fn(x: np.ndarray) -> np.ndarray:
     return (
         1.2 * np.exp(-((x - SEED_X) ** 2) / (2 * 0.35**2))
@@ -267,7 +291,7 @@ CONFIG = {
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
     "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.146, "alpha": 0.55, "zeta": 0.0},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
-    "Goose": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1.0, "epsilon": 0.15},
+    "GoOSE": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1, "epsilon": 0.075},
 }
 
 
@@ -283,8 +307,8 @@ def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float]
         return InstrumentedCSafeOpt(**kwargs, dim_obs=dim_obs)
     elif name == "GoSafeOpt":
         return GrowingGoSafeOpt(**CONFIG["GoSafeOpt"], dim_obs=dim_obs, data=data)
-    elif name == "Goose":
-        return GrowingGoose(**CONFIG["Goose"], dim_obs=dim_obs)
+    elif name == "GoOSE":
+        return GrowingGoose(**CONFIG["GoOSE"], dim_obs=dim_obs)
     else:
         raise ValueError(f"Unknown aquisition {name}")
 
@@ -344,7 +368,7 @@ def true_optimum(resolution: int = 200_000) -> float:
 def plot_bottleneck(results: dict, out_path: str):
     _apply_theme()
 
-    names = list(results.keys())
+    names = _legend_order(list(results.keys()))
     style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
     j_star = true_optimum()
 
@@ -379,7 +403,7 @@ def plot_bottleneck(results: dict, out_path: str):
         ],
         ignore_index=True,
     )
-    _plot_series(ax_trace, trace_df, "round", "chosen_x", names, style)
+    _plot_series(ax_trace, trace_df, "round", "chosen_x", _draw_order(names), style)
     ax_trace.axhspan(*VALLEY, color="gainsboro", alpha=0.6, zorder=0)
     ax_trace.set_xlabel("round")
     ax_trace.set_ylabel(r"chosen $x$")
@@ -400,7 +424,7 @@ def plot_bottleneck(results: dict, out_path: str):
         ],
         ignore_index=True,
     )
-    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", names, style)
+    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", _draw_order(names), style)
     ax_regret.set_xlabel("round")
     ax_regret.set_ylabel(r"cumulative regret $R_N$")
     ax_regret.set_title(rf"$R_N = \sum_t (J^\star - f(x_t))$, $J^\star = {j_star:.3f}$")
@@ -430,7 +454,7 @@ def plot_bottleneck(results: dict, out_path: str):
     if threshold_frames:
         threshold_df = pd.concat(threshold_frames, ignore_index=True)
         gate_names = [n for n in names if n in threshold_df["name"].unique()]
-        _plot_series(ax_threshold, threshold_df, "round", "value", gate_names, style, pointsize=3.5)
+        _plot_series(ax_threshold, threshold_df, "round", "value", _draw_order(gate_names), style, pointsize=3.5)
 
         for name, first_cross_episode, eta_at_crossing in crossing_lines:
             ax_threshold.axhline(eta_at_crossing, color=style[name][0], linestyle="-.", linewidth=1.6, alpha=0.7)
@@ -453,11 +477,11 @@ def plot_bottleneck(results: dict, out_path: str):
 
 @app.command()
 def bottleneck(
-    n_opt_samples: int = typer.Option(40, help="Number of BO rounds for every run"),
+    n_opt_samples: int = typer.Option(50, help="Number of BO rounds for every run"),
     seed: int = typer.Option(42, help="RNG seed shared by every run"),
     algorithms: List[str] = typer.Option(
-        ["SafeOpt", "SafeUCB", "CSafeOpt", "GoSafeOpt", "Goose"], help="Which acquisitions to run"
-    ),
+        ["SafeOpt", "SafeUCB", "CSafeOpt", "GoSafeOpt", "GoOSE"], help="Which acquisitions to run"
+   ),
     out: str = f"{Path().absolute()}/examples/bottleneck.png",
 ):
     Logger.set_verbosity(2)

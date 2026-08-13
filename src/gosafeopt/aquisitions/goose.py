@@ -117,9 +117,14 @@ class Goose(BaseAquisition):
         not_yet_safe = ~safe
 
         # A_t (eq. 25 pool): not-yet-safe candidates reachable within the
-        # optimistic (eps-slack) envelope of *some* currently safe point.
-        margin_from_safe = margin.masked_fill(~safe.unsqueeze(1), float("-inf"))
-        reachable_target = not_yet_safe & ((margin_from_safe + self.epsilon) >= 0.0).any(dim=0)
+        # optimistic (eps-slack) envelope of *some* W_t^eps point. Must use the
+        # same witness set as can_certify below (both are the paper's
+        # G_t^eps(alpha), eq. 26) -- witnessing via a safe-but-not-W_t^eps point
+        # (one already known past epsilon accuracy) would mark a target
+        # "reachable" using a witness that's then ineligible to actually
+        # certify it, since can_certify requires expander_pool membership.
+        margin_from_pool = margin.masked_fill(~expander_pool.unsqueeze(1), float("-inf"))
+        reachable_target = not_yet_safe & ((margin_from_pool + self.epsilon) >= 0.0).any(dim=0)
 
         if not reachable_target.any():
             # No not-yet-safe candidate is even optimistically reachable yet.

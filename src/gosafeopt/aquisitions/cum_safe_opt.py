@@ -13,16 +13,22 @@ class CSafeOpt(BaseAquisition):
 
     Implements the single scalar acquisition A_t(x) = u_t(x) + kappa_t *
     qbar_t(x) from "Cumulative Safe Opt" (Wendl, 2026). The gate qbar_t is
-    the normalized, thresholded posterior standard deviation of safe points;
-    its support is exactly the safe points whose uncertainty exceeds
-    tau_t = epsilon / beta_t ** alpha. Whenever an active gate exists it
-    strictly dominates every zero-gate point (Lemma 2), so the planner
-    always prefers an "expander" candidate over plain GP-UCB; once no
-    sufficiently uncertain safe point remains the gate vanishes exactly and
-    the acquisition reduces to safe GP-UCB. alpha controls how fast the
-    threshold shrinks over rounds (Section 6.5): alpha=0 is a fixed raw
-    threshold, alpha=1/2 is confidence-width matched, alpha>1/2 asymptotically
-    reaches the full safely-reachable comparator.
+    the normalized, thresholded posterior standard deviation of safe,
+    *expander* points; its support is exactly the safe points whose
+    constraint uncertainty AND reward uncertainty both still exceed the same
+    shrinking threshold tau_t = epsilon / beta_t ** alpha (eq. 29, cf.
+    GOOSE's W_t^eps in goose.py). Restricting to expanders keeps the gate
+    from firing on a safe point whose constraint is already tau_t-accurately
+    known but whose reward happens to still be uncertain -- such a point
+    can't move the safe/unsafe boundary, so exploring it for reward alone
+    isn't the kind of expansion the gate is meant to prioritize. Whenever an
+    active gate exists it strictly dominates every zero-gate point (Lemma
+    2), so the planner always prefers an "expander" candidate over plain
+    GP-UCB; once no expander remains sufficiently reward-uncertain the gate
+    vanishes exactly and the acquisition reduces to safe GP-UCB. alpha
+    controls how fast the threshold shrinks over rounds (Section 6.5):
+    alpha=0 is a fixed raw threshold, alpha=1/2 is confidence-width matched,
+    alpha>1/2 asymptotically reaches the full safely-reachable comparator.
 
     beta_t follows Chowdhury & Gopalan (2017), "On Kernelized Multi-armed
     Bandits", Theorem 2 -- the confidence sequence for a continuous (RKHS)
@@ -108,9 +114,26 @@ class CSafeOpt(BaseAquisition):
         slack = l - self.fmin
         ut = u[:, 0] + self.soft_penalty(slack)
 
-        # q_t^(alpha) (eq. 30): support is G_t^(alpha), the safe and sufficiently uncertain points.
-        gate = torch.clamp(std - self.threshold(), min=0.0)
-        gate[~safe] = 0.0
+        # Expander indicator (cf. GOOSE's W_t^eps, goose.py): safe points whose
+        # constraint confidence interval is still wider than tau_t = epsilon /
+        # beta_t^alpha (eq. 29) -- the same shrinking threshold the reward
+        # gate uses below, not a fixed raw epsilon -- on the tightest
+        # constraint. A fixed epsilon here collapsed the expander pool to
+        # empty within a couple of rounds whenever the constraint model's
+        # fitted uncertainty starts out small relative to a benchmark's raw
+        # epsilon, permanently disabling the gate since nothing could ever
+        # become an expander again. tau_t starts generous (beta_t small
+        # early on) and only tightens as the model matures, keeping a single
+        # coherent schedule for both reward- and constraint-uncertainty
+        # gating instead of two thresholds tuned on different scales.
+        tau_t = self.threshold()
+        constraint_width = (u[:, 1:] - l[:, 1:]).amin(dim=1)
+        expander = safe & (constraint_width > tau_t)
+
+        # q_t^(alpha) (eq. 30): support is G_t^(alpha), the safe, expander,
+        # and sufficiently (reward-)uncertain points.
+        gate = torch.clamp(std - tau_t, min=0.0)
+        gate[~expander] = 0.0
 
         gate_max = gate.max()
         normalized_gate = gate / gate_max if gate_max > 0 else torch.zeros_like(gate)

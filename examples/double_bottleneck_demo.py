@@ -36,7 +36,9 @@ from bottleneck_demo import (
     GrowingSafeUCB,
     InstrumentedCSafeOpt,
     _apply_theme,
+    _draw_order,
     _legend,
+    _legend_order,
     _plot_series,
     _style_axis,
     reset_global_state,
@@ -128,11 +130,11 @@ CONFIG = {
     },
     "SafeOpt": {"scale_beta": 1.0, "beta": 9},
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
-    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1, "alpha": 1, "zeta": 0.1},
+    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1, "alpha": 0.75, "zeta": 0.1},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
     # lipschitz=2.0 safely bounds constraint_fn's true max slope (~1.2, from the
     # narrower width-0.45 bump at the final peak plus the dip term).
-    "Goose": {"scale_beta": 1.0, "beta": 9, "lipschitz": 0.5, "epsilon": 0.1},
+    "GoOSE": {"scale_beta": 1.0, "beta": 9, "lipschitz": 0.5, "epsilon": 0.1},
 }
 
 
@@ -148,8 +150,8 @@ def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float]
         return InstrumentedCSafeOpt(**kwargs, dim_obs=dim_obs)
     elif name == "GoSafeOpt":
         return GrowingGoSafeOpt(**CONFIG["GoSafeOpt"], dim_obs=dim_obs, data=data)
-    elif name == "Goose":
-        return GrowingGoose(**CONFIG["Goose"], dim_obs=dim_obs)
+    elif name == "GoOSE":
+        return GrowingGoose(**CONFIG["GoOSE"], dim_obs=dim_obs)
     else:
         raise ValueError(f"Unknown aquisition {name}")
 
@@ -291,7 +293,7 @@ def _solve_nbar(gamma_fn, beta_fn, C_lambda: float, m_star: float, hi_cap: float
 def plot_double_bottleneck(results: dict, out_path: str):
     _apply_theme()
 
-    names = list(results.keys())
+    names = _legend_order(list(results.keys()))
     style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
     j_star = true_optimum()
 
@@ -329,7 +331,7 @@ def plot_double_bottleneck(results: dict, out_path: str):
         ],
         ignore_index=True,
     )
-    _plot_series(ax_trace, trace_df, "round", "chosen_x", names, style)
+    _plot_series(ax_trace, trace_df, "round", "chosen_x", _draw_order(names), style)
     for bottleneck in (BOTTLENECK_1, BOTTLENECK_2):
         ax_trace.axhspan(*bottleneck, color="gainsboro", alpha=0.6, zorder=0)
     ax_trace.set_xlabel("round")
@@ -351,7 +353,7 @@ def plot_double_bottleneck(results: dict, out_path: str):
         ],
         ignore_index=True,
     )
-    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", names, style)
+    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", _draw_order(names), style)
     ax_regret.set_xlabel("round")
     ax_regret.set_ylabel(r"cumulative regret $R_N$")
     ax_regret.set_title(rf"$R_N = \sum_t (J^\star - f(x_t))$, $J^\star = {j_star:.3f}$")
@@ -378,7 +380,7 @@ def plot_double_bottleneck(results: dict, out_path: str):
     if threshold_frames:
         threshold_df = pd.concat(threshold_frames, ignore_index=True)
         gate_names = [n for n in names if n in threshold_df["name"].unique()]
-        _plot_series(ax_threshold, threshold_df, "round", "value", gate_names, style, pointsize=3.5)
+        _plot_series(ax_threshold, threshold_df, "round", "value", _draw_order(gate_names), style, pointsize=3.5)
 
         for name, _first_cross_episode, eta_at_crossing in crossing_lines:
             ax_threshold.axhline(eta_at_crossing, color=style[name][0], linestyle="-.", linewidth=1.6, alpha=0.7)
@@ -417,7 +419,7 @@ def bottleneck(
     n_opt_samples: int = typer.Option(100, help="Number of BO rounds for every run"),
     seed: int = typer.Option(42, help="RNG seed shared by every run"),
     algorithms: List[str] = typer.Option(
-        ["SafeOpt", "SafeUCB", "CSafeOpt", "GoSafeOpt", "Goose"], help="Which acquisitions to run"
+        ["SafeOpt", "SafeUCB", "CSafeOpt", "GoOSE"], help="Which acquisitions to run"
     ),
     out: str = f"{Path().absolute()}/examples/double_bottleneck.png",
 ):

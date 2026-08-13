@@ -58,6 +58,7 @@ from bottleneck_demo import (
     InstrumentedCSafeOpt,
     _apply_theme,
     _legend,
+    _legend_order,
     _plot_series,
     _style_axis,
     reset_global_state,
@@ -272,12 +273,12 @@ CONFIG = {
     # acquisitions are O(set_size) and benefit a lot from denser candidate
     # coverage of the (already-tightened) safe corridor -- see SET_SIZE_OVERRIDES.
     "SET_SIZE_OVERRIDES": {"SafeOpt": 24000, "SafeUCB": 24000, "CSafeOpt": 24000, "GoSafeOpt": 24000},
-    "SafeOpt": {"scale_beta": 1.0, "beta": 9},
-    "SafeUCB": {"scale_beta": 1.0, "beta": 9},
-    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.2, "alpha": 0.7, "zeta": 0.001},
-    #"CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.15, "alpha": 0.65, "zeta": 0.001},
-    "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
-    "Goose": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1.0, "epsilon": 0.2},
+    "SafeOpt": {"scale_beta": 1.0, "beta": 3},
+    "SafeUCB": {"scale_beta": 1.0, "beta": 3},
+    #"CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.2, "alpha": 0.7, "zeta": 0.001},
+    "CSafeOpt": {"scale_beta": 1.0, "beta": 3, "epsilon": 0.15, "alpha": 0.65, "zeta": 0.01},
+    "GoSafeOpt": {"scale_beta": 1.0, "beta": 3, "n_max_local": 5, "n_max_global": 3},
+    "GoOSE": {"scale_beta": 1.0, "beta": 3, "lipschitz": 1.0, "epsilon": 0.2},
 }
 
 
@@ -384,8 +385,8 @@ def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float]
         return InstrumentedCSafeOpt(**kwargs, dim_obs=dim_obs)
     elif name == "GoSafeOpt":
         return GrowingGoSafeOpt(**CONFIG["GoSafeOpt"], dim_obs=dim_obs, data=data)
-    elif name == "Goose":
-        return GrowingGoose(**CONFIG["Goose"], dim_obs=dim_obs)
+    elif name == "GoOSE":
+        return GrowingGoose(**CONFIG["GoOSE"], dim_obs=dim_obs)
     else:
         raise ValueError(f"Unknown aquisition {name}")
 
@@ -457,10 +458,22 @@ def true_optimum(resolution: int = 400) -> float:
     return float(reward_fn(X, Y).max())
 
 
+# Fixed bottom-to-top draw order for the mars comparison plots -- overrides
+# the generic CSafeOpt-always-on-top convention (_draw_order) used in this
+# file's siblings. Names not in this list (there shouldn't be any, given
+# CONFIG/the `mars` command's algorithm choices) fall back to being drawn on
+# top, after everything listed here.
+_MARS_Z_ORDER = ["SafeOpt", "CSafeOpt", "GoOSE", "SafeUCB"]
+
+
+def _z_order(names: list) -> list:
+    return sorted(names, key=lambda n: _MARS_Z_ORDER.index(n) if n in _MARS_Z_ORDER else len(_MARS_Z_ORDER))
+
+
 def plot_mars(results: dict, out_path: str):
     _apply_theme()
 
-    names = list(results.keys())
+    names = _legend_order(list(results.keys()))
     style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
     j_star = true_optimum()
 
@@ -488,7 +501,7 @@ def plot_mars(results: dict, out_path: str):
     ax_terrain.legend(loc="upper left", fontsize=6, frameon=False)
 
     # --- trace (sampled points overlaid on the same terrain) ---------------
-    for n in names:
+    for n in _z_order(names):
         data, _aq = results[n]
         xs_n = data.train_x[:, 0].numpy()
         ys_n = data.train_x[:, 1].numpy()
@@ -513,7 +526,7 @@ def plot_mars(results: dict, out_path: str):
         ],
         ignore_index=True,
     )
-    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", names, style)
+    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", _z_order(names), style)
     ax_regret.set_xlabel("round")
     ax_regret.set_ylabel(r"cumulative regret $R_N$")
     ax_regret.set_title(rf"$R_N = \sum_t (J^\star - f(x_t))$, $J^\star = {j_star:.3f}$")
@@ -531,7 +544,7 @@ def plot_mars(results: dict, out_path: str):
     if threshold_frames:
         threshold_df = pd.concat(threshold_frames, ignore_index=True)
         gate_names = [n for n in names if n in threshold_df["name"].unique()]
-        _plot_series(ax_threshold, threshold_df, "round", "value", gate_names, style, pointsize=3.5)
+        _plot_series(ax_threshold, threshold_df, "round", "value", _z_order(gate_names), style, pointsize=3.5)
         _legend(ax_threshold, gate_names, style)
 
     ax_threshold.set_xlabel("round")
@@ -558,7 +571,7 @@ def animate_mars(results: dict, out_path: str, n_frames: int = 60, fps: int = 8,
     """
     _apply_theme()
 
-    names = list(results.keys())
+    names = _legend_order(list(results.keys()))
     style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
     j_star = true_optimum()
 
@@ -603,10 +616,13 @@ def animate_mars(results: dict, out_path: str, n_frames: int = 60, fps: int = 8,
 
     trace_artists = {
         n: ax_trace.scatter([], [], s=10, color=style[n][0], marker=style[n][1], alpha=0.85, linewidths=0.3, edgecolors="white")
-        for n in names
+        for n in _z_order(names)
     }
-    regret_lines = {n: ax_regret.plot([], [], color=style[n][0], linewidth=1.8)[0] for n in names}
-    threshold_lines = {n: ax_threshold.plot([], [], color=style[n][0], linewidth=1.8)[0] for n in threshold_curves}
+    regret_lines = {n: ax_regret.plot([], [], color=style[n][0], linewidth=1.8)[0] for n in _z_order(names)}
+    threshold_lines = {
+        n: ax_threshold.plot([], [], color=style[n][0], linewidth=1.8)[0]
+        for n in _z_order([n for n in names if n in threshold_curves])
+    }
 
     ax_regret.set_xlim(0, max_round)
     ax_regret.set_ylim(0, max(curve.max() for curve in regret_curves.values()) * 1.05)
@@ -624,7 +640,7 @@ def animate_mars(results: dict, out_path: str, n_frames: int = 60, fps: int = 8,
         ax_threshold.set_xlim(all_rounds.min(), max_round)
         pad = 0.05 * (all_eta.max() - all_eta.min() + 1e-12)
         ax_threshold.set_ylim(all_eta.min() - pad, all_eta.max() + pad)
-        _legend(ax_threshold, list(threshold_curves.keys()), style)
+        _legend(ax_threshold, _legend_order([n for n in names if n in threshold_curves]), style)
 
     for ax in fig.get_axes():
         _style_axis(ax)
@@ -678,7 +694,7 @@ def mars(
     n_opt_samples: int = typer.Option(600, help="Number of BO rounds for every run"),
     seed: int = typer.Option(42, help="RNG seed shared by every run"),
     algorithms: List[str] = typer.Option(
-        ["SafeOpt", "SafeUCB", "CSafeOpt", "Goose"], help="Which acquisitions to run"
+        ["SafeOpt", "SafeUCB", "CSafeOpt", "GoOSE"], help="Which acquisitions to run"
         # ["CSafeOpt"], help="Which acquisitions to run"
     ),
     out: str = f"{Path().absolute()}/examples/mars.png",

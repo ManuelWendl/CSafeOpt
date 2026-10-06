@@ -49,12 +49,12 @@ from mirage_demo import (
 from torch import Tensor
 from tueplots import figsizes
 
-import gosafeopt
-from gosafeopt.models.model import ModelGenerator
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.logger import Logger
+import csafeopt
+from csafeopt.models.model import ModelGenerator
+from csafeopt.tools.data import Data
+from csafeopt.tools.logger import Logger
 
-gosafeopt.device = torch.device("cpu")
+csafeopt.device = torch.device("cpu")
 
 app = typer.Typer()
 

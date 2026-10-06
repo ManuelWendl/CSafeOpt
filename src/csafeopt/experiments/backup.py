@@ -5,11 +5,11 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 
-import gosafeopt
-from gosafeopt.aquisitions.go_safe_opt import GoSafeOpt, OptimizationStep
-from gosafeopt.optim.safe_set import SafeSet
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.logger import Logger
+import csafeopt
+from csafeopt.aquisitions.go_safe_opt import GoSafeOpt, OptimizationStep
+from csafeopt.optim.safe_set import SafeSet
+from csafeopt.tools.data import Data
+from csafeopt.tools.logger import Logger
 
 
 class BackupStrategy(ABC):
@@ -55,7 +55,7 @@ class GoSafeOptBackup(BackupStrategy):
             and not np.any(rewards[1:] < 0)
         ):
             p = torch.from_numpy(param)
-            p.to(gosafeopt.device)
+            p.to(csafeopt.device)
             GoSafeOpt.go_to_local_exploration()
             SafeSet.add_new_safe_set(p.reshape(1, -1))
             SafeSet.change_to_latest_safe_set()

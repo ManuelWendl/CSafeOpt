@@ -15,17 +15,17 @@ from matplotlib.lines import Line2D
 from torch import Tensor
 from tueplots import figsizes
 
-import gosafeopt
-from gosafeopt.aquisitions.ucb import UCB
-from gosafeopt.experiments.environment import Environment
-from gosafeopt.experiments.experiment import Experiment
-from gosafeopt.models.model import ModelGenerator
-from gosafeopt.optim.grid_opt import GridOpt
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.logger import Logger
-from gosafeopt.trainer import Trainer
+import csafeopt
+from csafeopt.aquisitions.ucb import UCB
+from csafeopt.experiments.environment import Environment
+from csafeopt.experiments.experiment import Experiment
+from csafeopt.models.model import ModelGenerator
+from csafeopt.optim.grid_opt import GridOpt
+from csafeopt.tools.data import Data
+from csafeopt.tools.logger import Logger
+from csafeopt.trainer import Trainer
 
-gosafeopt.device = torch.device("cpu")
+csafeopt.device = torch.device("cpu")
 
 app = typer.Typer()
 

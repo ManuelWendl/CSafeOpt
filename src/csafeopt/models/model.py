@@ -10,8 +10,8 @@ from gpytorch.kernels import ScaleKernel
 from gpytorch.means import ConstantMean
 from torch import Tensor
 
-import gosafeopt
-from gosafeopt.tools.data import Data
+import csafeopt
+from csafeopt.tools.data import Data
 
 
 class ModelGenerator:
@@ -75,7 +75,7 @@ class ModelGenerator:
                 noise_constraint=gpytorch.constraints.GreaterThan(1e-8)
             )
             likelihood.noise = self.likelihood_noise
-            likelihood.to(gosafeopt.device)
+            likelihood.to(csafeopt.device)
 
             # TODO: how to update outcome_transform with condition on observation
             if self.normalize_output:
@@ -108,7 +108,7 @@ class ModelGenerator:
                     mean_module=mean_module,
                     outcome_transform=outcome_transform,
                     input_transform=input_transform,
-                ).to(gosafeopt.device)
+                ).to(csafeopt.device)
             )
 
         model = ModelListGP(*models)

@@ -175,7 +175,7 @@ def _worker_init(threads: int) -> None:
 
 
 def _run_one(task: dict) -> dict:
-    from gosafeopt.tools.logger import Logger
+    from csafeopt.tools.logger import Logger
 
     Logger.set_verbosity(0)
     module = importlib.import_module(BENCHMARKS[task["benchmark"]].module)

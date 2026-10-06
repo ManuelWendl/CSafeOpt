@@ -4,7 +4,7 @@ import numpy as np
 import wandb
 from torch import Tensor
 
-from gosafeopt.tools.data import Data
+from csafeopt.tools.data import Data
 
 
 class WandbLogger:

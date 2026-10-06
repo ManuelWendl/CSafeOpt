@@ -6,12 +6,12 @@ import numpy as np
 import torch
 from torch import Tensor
 
-import gosafeopt
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
-from gosafeopt.optim.base_optimizer import BaseOptimizer
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.math import clamp2dTensor
-from gosafeopt.tools.rand import rand2n_torch
+import csafeopt
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.optim.base_optimizer import BaseOptimizer
+from csafeopt.tools.data import Data
+from csafeopt.tools.math import clamp2dTensor
+from csafeopt.tools.rand import rand2n_torch
 
 
 class SwarmOpt(BaseOptimizer):
@@ -81,7 +81,7 @@ class SwarmOpt(BaseOptimizer):
                     np.abs(self.domain_end - self.domain_start),
                     x.shape[0],
                     self.dim_params + self.dim_context,
-                ).to(gosafeopt.device)
+                ).to(csafeopt.device)
                 / 10
             )
 
@@ -96,13 +96,13 @@ class SwarmOpt(BaseOptimizer):
                     torch.tensor([1]).repeat(dim),
                     x.shape[0],
                     dim,
-                ).to(gosafeopt.device)
+                ).to(csafeopt.device)
                 r_g = rand2n_torch(
                     torch.tensor([0]).repeat(dim),
                     torch.tensor([1]).repeat(dim),
                     x.shape[0],
                     dim,
-                ).to(gosafeopt.device)
+                ).to(csafeopt.device)
                 v = inertia_scale * v + self.p * r_p * (p - x) + self.g * r_g * (p_best - x)
                 inertia_scale *= 0.95
 
@@ -112,8 +112,8 @@ class SwarmOpt(BaseOptimizer):
 
                 v = clamp2dTensor(
                     v,
-                    torch.tensor([-10 * self.w], device=gosafeopt.device).repeat(v.shape[1]),
-                    torch.tensor([10 * self.w], device=gosafeopt.device).repeat(v.shape[1]),
+                    torch.tensor([-10 * self.w], device=csafeopt.device).repeat(v.shape[1]),
+                    torch.tensor([10 * self.w], device=csafeopt.device).repeat(v.shape[1]),
                 )
                 x += v
                 x = clamp2dTensor(x, self.domain_start, self.domain_end)

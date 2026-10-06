@@ -5,7 +5,7 @@ import torch
 from botorch.models.pairwise_gp import GPyTorchPosterior
 from torch import Tensor
 
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
 
 
 class CSafeOpt(BaseAquisition):

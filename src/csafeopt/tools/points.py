@@ -2,7 +2,7 @@ import torch
 import math
 from torch.autograd import Variable
 
-from gosafeopt.tools.rand import rand2n_torch
+from csafeopt.tools.rand import rand2n_torch
 
 
 def random(start, end, set_size, dim):

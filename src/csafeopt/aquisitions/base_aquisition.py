@@ -7,8 +7,8 @@ from botorch.acquisition.proximal import ModelListGP
 from botorch.models.pairwise_gp import GPyTorchPosterior
 from torch import Tensor
 
-import gosafeopt
-from gosafeopt.tools.data import Data
+import csafeopt
+from csafeopt.tools.data import Data
 
 
 class BaseAquisition(ABC):
@@ -28,7 +28,7 @@ class BaseAquisition(ABC):
         self.data = data
         self.steps = n_steps
         self.model: None | ModelListGP = None
-        self.fmin = torch.zeros(self.dim_obs).to(gosafeopt.device)
+        self.fmin = torch.zeros(self.dim_obs).to(csafeopt.device)
 
     def update_model(self, model: ModelListGP):
         self.model = model

@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
 
 
 class SafeUCB(BaseAquisition):

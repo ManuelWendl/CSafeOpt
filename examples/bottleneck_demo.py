@@ -17,26 +17,26 @@ from matplotlib.lines import Line2D
 from seaborn import axes_style
 from tueplots import bundles, figsizes
 
-import gosafeopt
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
-from gosafeopt.aquisitions.cum_safe_opt import CSafeOpt
-from gosafeopt.aquisitions.cum_safe_opt_single_bonus import CSafeOptSimple
-from gosafeopt.aquisitions.go_safe_opt import GoSafeOpt
-from gosafeopt.aquisitions.goose import Goose
-from gosafeopt.aquisitions.ise_bo import ISEBO
-from gosafeopt.aquisitions.safe_opt import SafeOpt
-from gosafeopt.aquisitions.safe_ucb import SafeUCB
-from gosafeopt.experiments.environment import Environment
-from gosafeopt.experiments.experiment import Experiment
-from gosafeopt.models.model import ModelGenerator
-from gosafeopt.optim.grid_opt import GridOpt
-from gosafeopt.optim.safe_set import SafeSet
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.logger import Logger
-from gosafeopt.trainer import Trainer
+import csafeopt
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.aquisitions.cum_safe_opt import CSafeOpt
+from csafeopt.aquisitions.cum_safe_opt_single_bonus import CSafeOptSimple
+from csafeopt.aquisitions.go_safe_opt import GoSafeOpt
+from csafeopt.aquisitions.goose import Goose
+from csafeopt.aquisitions.ise_bo import ISEBO
+from csafeopt.aquisitions.safe_opt import SafeOpt
+from csafeopt.aquisitions.safe_ucb import SafeUCB
+from csafeopt.experiments.environment import Environment
+from csafeopt.experiments.experiment import Experiment
+from csafeopt.models.model import ModelGenerator
+from csafeopt.optim.grid_opt import GridOpt
+from csafeopt.optim.safe_set import SafeSet
+from csafeopt.tools.data import Data
+from csafeopt.tools.logger import Logger
+from csafeopt.trainer import Trainer
 from torch import Tensor
 
-gosafeopt.device = torch.device("cpu")
+csafeopt.device = torch.device("cpu")
 
 app = typer.Typer()
 

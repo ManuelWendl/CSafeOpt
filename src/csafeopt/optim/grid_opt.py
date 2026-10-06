@@ -1,9 +1,9 @@
 from gpytorch.kernels.index_kernel import Optional
 from torch import Tensor
 
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
-from gosafeopt.optim.base_optimizer import BaseOptimizer
-from gosafeopt.tools.data import Data
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.optim.base_optimizer import BaseOptimizer
+from csafeopt.tools.data import Data
 
 
 class GridOpt(BaseOptimizer):

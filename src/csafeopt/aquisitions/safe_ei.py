@@ -4,8 +4,8 @@ import torch
 from scipy.stats import norm
 from torch import Tensor
 
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
-from gosafeopt.tools.data import Data
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.tools.data import Data
 
 
 class SafeEI(BaseAquisition):

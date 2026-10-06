@@ -11,13 +11,13 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 from rich.progress import track
 from torch import Tensor
 
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
-from gosafeopt.experiments.experiment import Experiment
-from gosafeopt.models.model import ModelGenerator
-from gosafeopt.optim.base_optimizer import BaseOptimizer, SafeSet
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.data_logger import WandbLogger
-from gosafeopt.tools.logger import Logger
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.experiments.experiment import Experiment
+from csafeopt.models.model import ModelGenerator
+from csafeopt.optim.base_optimizer import BaseOptimizer, SafeSet
+from csafeopt.tools.data import Data
+from csafeopt.tools.data_logger import WandbLogger
+from csafeopt.tools.logger import Logger
 
 
 class Trainer:

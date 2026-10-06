@@ -6,10 +6,10 @@ from gymnasium.utils.save_video import save_video
 from numpy.typing import NDArray
 from torch import Tensor
 
-from gosafeopt.experiments.backup import BackupStrategy
-from gosafeopt.experiments.environment import Environment
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.logger import Logger
+from csafeopt.experiments.backup import BackupStrategy
+from csafeopt.experiments.environment import Environment
+from csafeopt.tools.data import Data
+from csafeopt.tools.logger import Logger
 
 
 class Experiment:

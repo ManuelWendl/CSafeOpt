@@ -2,8 +2,8 @@ import copy
 from typing import Optional
 
 import numpy as np
-from gosafeopt.experiments.environment import Environment
-from gosafeopt.experiments.experiment import Experiment
+from csafeopt.experiments.environment import Environment
+from csafeopt.experiments.experiment import Experiment
 from gymnasium.envs.classic_control.pendulum import PendulumEnv
 from pendulum.dynamics import U_ideal, U_learned
 import torch

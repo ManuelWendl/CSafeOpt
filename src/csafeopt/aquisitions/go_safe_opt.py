@@ -4,9 +4,9 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-import gosafeopt
-from gosafeopt.aquisitions.safe_opt import SafeOpt
-from gosafeopt.tools.data import Data
+import csafeopt
+from csafeopt.aquisitions.safe_opt import SafeOpt
+from csafeopt.tools.data import Data
 
 
 class OptimizationStep(Enum):
@@ -88,5 +88,5 @@ class GoSafeOpt(SafeOpt):
             data = torch.vstack([data, self.data.failed_k])
 
         # TODO: rethink this
-        distance = self.model.models[0].covar_module.covar_dist(data.to(gosafeopt.device), x).min(axis=0)[0]
+        distance = self.model.models[0].covar_module.covar_dist(data.to(csafeopt.device), x).min(axis=0)[0]
         return distance

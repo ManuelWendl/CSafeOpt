@@ -5,12 +5,12 @@ import torch
 from torch import Tensor
 from torch.distributions import MultivariateNormal
 
-import gosafeopt
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
-from gosafeopt.optim.safe_set import SafeSet
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.logger import Logger
-from gosafeopt.tools.points import random, uniform
+import csafeopt
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.optim.safe_set import SafeSet
+from csafeopt.tools.data import Data
+from csafeopt.tools.logger import Logger
+from csafeopt.tools.points import random, uniform
 
 
 class BaseOptimizer:
@@ -69,11 +69,11 @@ class BaseOptimizer:
             #
             # Use initial safe point as seed
             if safe_set is None or len(safe_set) == 0:
-                safe_set = self.data.train_x[-1:].to(gosafeopt.device)
+                safe_set = self.data.train_x[-1:].to(csafeopt.device)
             else:
                 # TODO: why is this needed? Should already be on correct device.
                 for i in range(len(SafeSet.safe_sets)):
-                    SafeSet.safe_sets[i] = SafeSet.safe_sets[i].to(gosafeopt.device)
+                    SafeSet.safe_sets[i] = SafeSet.safe_sets[i].to(csafeopt.device)
                 safe_set = torch.vstack(SafeSet.safe_sets) if mode == "safe_all" else SafeSet.get_current_safe_set()
 
             if safe_set is None:
@@ -86,7 +86,7 @@ class BaseOptimizer:
             else:
                 distribution = MultivariateNormal(
                     safe_set.mean(axis=0),  # type: ignore
-                    1e-3 * torch.eye(safe_set.shape[1], device=gosafeopt.device),
+                    1e-3 * torch.eye(safe_set.shape[1], device=csafeopt.device),
                 )
                 x = distribution.rsample(torch.Size([n]))
                 if self.context is not None:
@@ -96,7 +96,7 @@ class BaseOptimizer:
         else:
             raise RuntimeError("Set init not defined")
 
-        return x.to(gosafeopt.device)
+        return x.to(csafeopt.device)
 
     def optimize_steps(self) -> Tuple[Tensor, Tensor]:
         x, reward = None, None

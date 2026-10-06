@@ -1,7 +1,7 @@
 import torch
-import gosafeopt
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
-from gosafeopt.tools.logger import Logger
+import csafeopt
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.tools.logger import Logger
 from typing import Optional
 from torch import Tensor
 
@@ -44,7 +44,7 @@ class SafeSet:
 
     @classmethod
     def add_to_current_safe_set(cls, safeset: Tensor):
-        safeset.to(gosafeopt.device)
+        safeset.to(csafeopt.device)
         current_safe_set = cls.get_current_safe_set()
         if current_safe_set is not None:
             cls.safe_sets[cls.current_safe_set] = torch.vstack([current_safe_set, safeset])
@@ -53,7 +53,7 @@ class SafeSet:
 
     @classmethod
     def add_new_safe_set(cls, safeset: Tensor):
-        safeset.to(gosafeopt.device)
+        safeset.to(csafeopt.device)
         cls.safe_sets.append(safeset)
 
     @classmethod

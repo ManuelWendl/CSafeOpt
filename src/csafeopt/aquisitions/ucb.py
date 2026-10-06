@@ -1,12 +1,11 @@
 from typing import Optional
 
-import torch
 from torch import Tensor
 
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
 
 
-class SafeLCB(BaseAquisition):
+class UCB(BaseAquisition):
     def __init__(
         self,
         dim_obs: int,
@@ -18,9 +17,8 @@ class SafeLCB(BaseAquisition):
 
     def evaluate(self, x: Tensor):
         posterior = self.model_posterior(x)
-        l, _ = self.get_confidence_interval(posterior)  # noqa: E741
+        _, ucb = self.get_confidence_interval(posterior)
 
-        safe_set = torch.all(l[:, 1:] > self.fmin[1:], axis=1)  # type: ignore
-        l[~safe_set] = -1e10
+        loss_perf = ucb[:, 0]
 
-        return l[:, 0]
+        return loss_perf

@@ -5,8 +5,8 @@ from botorch.models.pairwise_gp import GPyTorchPosterior
 from torch import Tensor
 from torch.distributions.multivariate_normal import MultivariateNormal
 
-import gosafeopt
-from gosafeopt.aquisitions.base_aquisition import BaseAquisition
+import csafeopt
+from csafeopt.aquisitions.base_aquisition import BaseAquisition
 
 
 class SafeOpt(BaseAquisition):
@@ -88,8 +88,8 @@ class SafeOpt(BaseAquisition):
 
         # TODO: how to set scale?
         normal = MultivariateNormal(
-            loc=torch.zeros_like(slack[:, 1:], device=gosafeopt.device),
-            covariance_matrix=torch.eye(slack.shape[1] - 1, device=gosafeopt.device),
+            loc=torch.zeros_like(slack[:, 1:], device=csafeopt.device),
+            covariance_matrix=torch.eye(slack.shape[1] - 1, device=csafeopt.device),
         )
         interest_function = normal.log_prob(slack[:, 1:])
         interest_function -= interest_function.min()

@@ -1,5 +1,5 @@
 import numpy as np
-from gosafeopt.tools.math import clamp, angleDiff
+from csafeopt.tools.math import clamp, angleDiff
 
 
 def U_ideal(x, c):

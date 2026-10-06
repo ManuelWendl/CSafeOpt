@@ -3,7 +3,7 @@ import torch
 from pyro.infer.autoguide.structured import Optional
 from torch import Tensor
 
-import gosafeopt
+import csafeopt
 
 
 class Data:
@@ -21,9 +21,9 @@ class Data:
         self.train_y = train_y
 
         # TODO could be done more memory efficient
-        self.backup = train_x_rollout.to(gosafeopt.device) if train_x_rollout is not None else None
-        self.backup_loss = train_y_rollout.to(gosafeopt.device) if train_y_rollout is not None else None
-        self.backup_k = k_rollout.to(gosafeopt.device) if k_rollout is not None else None
+        self.backup = train_x_rollout.to(csafeopt.device) if train_x_rollout is not None else None
+        self.backup_loss = train_y_rollout.to(csafeopt.device) if train_y_rollout is not None else None
+        self.backup_k = k_rollout.to(csafeopt.device) if k_rollout is not None else None
         self.failed_k = failed_k
         self.failed_x_rollout = failed_x_rollout
 

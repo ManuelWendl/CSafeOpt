@@ -6,15 +6,15 @@ import numpy as np
 import torch
 import typer
 import wandb
-from gosafeopt.aquisitions.go_safe_opt import GoSafeOpt
-from gosafeopt.experiments.backup import GoSafeOptBackup
-from gosafeopt.experiments.experiment import Experiment
-from gosafeopt.models.model import ModelGenerator
-from gosafeopt.optim.swarm_opt import SwarmOpt
-from gosafeopt.tools.data import Data
-from gosafeopt.tools.data_logger import WandbLogger
-from gosafeopt.tools.logger import Logger
-from gosafeopt.trainer import Trainer
+from csafeopt.aquisitions.go_safe_opt import GoSafeOpt
+from csafeopt.experiments.backup import GoSafeOptBackup
+from csafeopt.experiments.experiment import Experiment
+from csafeopt.models.model import ModelGenerator
+from csafeopt.optim.swarm_opt import SwarmOpt
+from csafeopt.tools.data import Data
+from csafeopt.tools.data_logger import WandbLogger
+from csafeopt.tools.logger import Logger
+from csafeopt.trainer import Trainer
 from pendulum.environments import PendulumGymEnv
 from torch import Tensor
 

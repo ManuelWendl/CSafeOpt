@@ -3,11 +3,11 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-name = "gosafeopt"
+name = "csafeopt"
 version = "0.1.0"
-description = "Bayesion Optimization library focused on contextual GoSafeOpt"
-authors = ["Daniel Widmer <widmdani@ethz.ch>"]
-packages = [{include = "gosafeopt", from = "src"}]
+description = "Bayesion Optimization library focused on CSafeOpt"
+authors = ["Anonymous <anonymous@example.com>"]
+packages = [{include = "csafeopt", from = "src"}]
 license = "GNU GPLv3"
 readme = "README.md"
 

@@ -1,6 +1,7 @@
 # Cumulative SafeOpt -- No Regret Safe Bayesian Optimization
 
-This repository contains the code for the gated exploration mechanism CSafeOpt. 
+This repository contains the code for the gated exploration mechanism CSafeOpt. It extends the implementation
+of GoSafeOpt (see [Acknowledgement](#acknowledgement)).
 
 ## Setup
 
@@ -50,4 +51,19 @@ python examples/mars_demo.py random-landings-extend --out examples/statistical_e
 python examples/multistart_bars.py --results-dir examples/statistical_evaluation \
   --replace mars_near_nominal=examples/statistical_evaluation/mars.csv \
   --out examples/statistical_evaluation/regret_bars.png
+```
+
+## Acknowledgement
+
+This code extends the implementation of GoSafeOpt by Sukhija et al. 
+
+```
+@article{sukhija2023gosafeopt,
+  title={GoSafeOpt: Scalable safe exploration for global optimization of dynamical systems},
+  author={Sukhija, Bhavya and Turchetta, Matteo and Lindner, David and Krause, Andreas and Trimpe, Sebastian and Baumann, Dominik},
+  journal={Artificial Intelligence},
+  volume={320},
+  year={2023},
+  publisher={Elsevier}
+}
 ```

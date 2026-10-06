@@ -43,13 +43,20 @@ class SafeOpt(BaseAquisition):
     def lower_bound(self, x: GPyTorchPosterior) -> Tensor:
         l, _ = self.get_confidence_interval(x)  # noqa: E741
 
-        max_lcb = torch.max(l[:, 0])
-        if max_lcb > SafeOpt.best_lcb:
-            SafeOpt.best_lcb = max_lcb
+        safe = torch.all(l[:, 1:] > self.fmin[1:], dim=1)
+        if safe.any():
+            max_lcb = torch.max(l[safe, 0])
+            if max_lcb > SafeOpt.best_lcb:
+                SafeOpt.best_lcb = max_lcb
 
         slack = l - self.fmin
 
-        return l[:, 0] + self.soft_penalty(slack)
+        return self._mask_unsafe(l[:, 0] + self.soft_penalty(slack), l)
+
+    def _mask_unsafe(self, values: Tensor, lower: Tensor) -> Tensor:
+        # A reward or exploration bonus must never buy a safety violation.
+        safe = torch.all(lower[:, 1:] > self.fmin[1:], dim=1)
+        return torch.where(safe, values, torch.full_like(values, -torch.inf))
 
     def maximizers(self, x: GPyTorchPosterior) -> Tensor:
         l, u = self.get_confidence_interval(x)  # noqa: E741
@@ -68,7 +75,7 @@ class SafeOpt(BaseAquisition):
 
         value = (values + penalties) * interest_function
 
-        return value
+        return self._mask_unsafe(value, l)
 
     def expanders(self, x: GPyTorchPosterior) -> Tensor:
         l, u = self.get_confidence_interval(x)  # noqa: E741
@@ -92,7 +99,7 @@ class SafeOpt(BaseAquisition):
 
         value = (values + penalties) * interest_function
 
-        return value
+        return self._mask_unsafe(value, l)
 
     def reset(self):
         self.best_lcb = -1e10

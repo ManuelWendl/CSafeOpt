@@ -1,34 +1,3 @@
-"""Sublinear-regret demo: plain GP-UCB, no safety constraint at all, on a
-synthetic multi-modal 1D objective -- animated round by round to make the
-textbook GP-UCB regret guarantee (Srinivas et al. 2010; using the tighter
-Chowdhury & Gopalan 2017 beta_t sequence this repo's own Growing*
-acquisitions already rely on) visible rather than just asserted: cumulative
-regret R_N = sum_t (f* - f(x_t)) bends below the straight line a *constant*
-per-round regret would trace, and average regret R_N/N trends toward 0 --
-literally the definition of sublinear regret.
-
-Deliberately standalone and unconstrained: no safe set, no constraint
-channel, no wall/bottleneck -- just plain UCB (mean + confidence half-width,
-nothing else) wrapped in bottleneck_demo.py's ChowdhuryGopalanBeta
-growing-beta mixin, reusing that file's paper-style plotting the same way
-every other demo in this suite does.
-
-gosafeopt.aquisitions.ucb.UCB itself is not used directly: its evaluate()
-is declared as evaluate(self, x) with no `step` argument, but both
-GridOpt.optimize and SwarmOpt.optimize call `aquisition.evaluate(x, step)` --
-a TypeError as soon as it's actually driven through either optimizer. It also
-never overrides is_internal_step(), so it inherits BaseAquisition's default
-(True at step=0), which makes BaseOptimizer.optimize_steps() discard every
-candidate and leave x=None, crashing next_params() next. Both are
-pre-existing bugs in ucb.py, unrelated to this script; rather than patching
-that file, GrowingUCB below duplicates its one-line scoring locally with a
-correct signature (same fix SafeUCB/Goose already apply to the same two
-methods).
-
-Usage:
-    python examples/ucb_regret_demo.py
-"""
-
 import random
 from pathlib import Path
 from typing import Optional
@@ -61,11 +30,8 @@ gosafeopt.device = torch.device("cpu")
 app = typer.Typer()
 
 DOMAIN = (0.0, 10.0)
-SEED_X = 0.2  # arbitrary initial sample -- unconstrained, so no "safety" meaning here, just a starting point
+SEED_X = 0.2
 
-# Three well-separated bumps of different heights: a couple of decoys plus a
-# clear single global maximum, so GP-UCB actually has some exploring to do
-# before it can settle into (mostly) exploiting the true optimum.
 def objective_fn(x: np.ndarray) -> np.ndarray:
     return (
         1.0 * np.exp(-((x - 1.5) ** 2) / (2 * 0.6**2))
@@ -84,24 +50,18 @@ class UnconstrainedEnv(Environment):
 
     def step(self, k):
         x = float(k[0])
-        # Experiment.rollout divides by len(trajectory) == 2 for a single-step
-        # episode; double the raw value so data.train_y matches objective_fn.
         reward = np.array([2 * objective_fn(x)])
         return np.array([x]), reward, True, False, {}
 
 
 class GrowingUCB(ChowdhuryGopalanBeta, UCB):
-    """Plain GP-UCB (mean + growing-beta confidence half-width, no safety
-    machinery at all) -- see module docstring for why this overrides
-    UCB.evaluate()/is_internal_step() rather than inheriting them as-is.
-    """
 
-    def is_internal_step(self, step: int = 0) -> bool:  # noqa: ARG002
+    def is_internal_step(self, step: int = 0) -> bool:
         return False
 
-    def evaluate(self, x: Tensor, step: int = 0) -> Tensor:  # noqa: ARG002
+    def evaluate(self, x: Tensor, step: int = 0) -> Tensor:
         posterior = self.model_posterior(x)
-        _, u = self.get_confidence_interval(posterior)  # noqa: E741
+        _, u = self.get_confidence_interval(posterior)
         return u[:, 0]
 
 
@@ -124,7 +84,7 @@ CONFIG = {
         "set_size": 4000,
         "set_init": "random",
         "max_global_steps_without_progress_tolerance": 0.9,
-        "max_global_steps_without_progress": 10_000,  # effectively disabled
+        "max_global_steps_without_progress": 10_000,
     },
     "UCB": {"scale_beta": 1.0, "beta": 9},
 }
@@ -195,7 +155,7 @@ def _precompute_frames(data, aquisition, xs_t: Tensor, frame_rounds: list) -> li
         model = model_generator.generate(sub_data)
         aquisition.update_model(model)
         posterior = aquisition.model_posterior(xs_t)
-        l, u = aquisition.get_confidence_interval(posterior)  # noqa: E741
+        l, u = aquisition.get_confidence_interval(posterior)
         mean = posterior.mean.reshape(-1, aquisition.dim_obs)
         frames.append(
             {
@@ -219,10 +179,6 @@ def animate_regret(
     grid_size: int = 500,
     height_scale: float = 1.0,
 ):
-    """Render a 1x2 GIF: objective+GP+samples (left), cumulative regret
-    against a linear-growth reference (right) -- R_N visibly bending below
-    that reference and flattening out is what makes sublinearity visible.
-    """
     _apply_theme()
     figsize_rc = figsizes.iclr2023(nrows=1, ncols=2)
     width, height = figsize_rc["figure.figsize"]
@@ -241,7 +197,6 @@ def animate_regret(
     frame_rounds = sorted(set(np.linspace(1, max_round, min(n_frames, max_round)).astype(int)))
     frames = _precompute_frames(data, aquisition, xs_t, frame_rounds)
 
-    # --- objective panel: static background ---------------------------------
     ax_obj.plot(xs, true_obj, color=obj_color, linewidth=1.2, linestyle="--", zorder=2)
     ax_obj.axvline(SEED_X, color="black", linestyle=":", linewidth=1.0, zorder=1)
     ax_obj.set_xlim(*DOMAIN)
@@ -265,7 +220,6 @@ def animate_regret(
     ]
     ax_obj.legend(handles=legend_handles, loc="upper left", fontsize=6, frameon=False)
 
-    # --- cumulative regret vs. a linear-growth reference --------------------
     regret_curve = np.cumsum(j_star - data.train_y[:, 0].numpy())
     (regret_line,) = ax_regret.plot([], [], color=obj_color, linewidth=1.8, zorder=2, label=r"$R_N$")
     regret_point = ax_regret.scatter([], [], s=18, color=obj_color, marker=MARKERS[0], zorder=3)
@@ -276,9 +230,6 @@ def animate_regret(
     ax_regret.set_title(r"$R_N = \sum_t (f^\star - f(x_t))$")
     ax_regret.legend(loc="lower right", fontsize=6, frameon=False)
 
-    # Average regret R_N/N -- no dedicated panel, just reported in the
-    # per-frame title text (R_N/N -> 0 is literally what "sublinear regret"
-    # means).
     avg_regret_curve = regret_curve / np.arange(1, max_round + 1)
 
     for ax in fig.get_axes():

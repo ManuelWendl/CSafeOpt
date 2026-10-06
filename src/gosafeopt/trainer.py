@@ -1,8 +1,11 @@
+import gc
+from copy import deepcopy
 from typing import Optional
 
 import numpy as np
 import torch
 from botorch import fit_gpytorch_mll
+from botorch.exceptions.errors import ModelFittingError
 from botorch.models import ModelListGP
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from rich.progress import track
@@ -42,6 +45,7 @@ class Trainer:
         self.context = context
         self.reward_max = -1e10 * torch.ones(self.dim_obs)  # Something small
         self.best_k = None
+        self.lengthscale_history = []
 
     # TODO: make parameters explicit instead of config
     def train(
@@ -73,9 +77,13 @@ class Trainer:
                 # For now we generate new model since condition_on_observations has a problem with input transforms...
                 model = model_generator.generate(self.data)
 
+                if self.refit_reward_model(model, episode):
+                    model_generator.remember_fitted_parameters(model)
+                self.lengthscale_history.append(
+                    (episode, model.models[0].covar_module.base_kernel.lengthscale.detach().cpu().clone())
+                )
                 aquisition.update_model(model)
                 aquisition.before_optimization()
-                self.refit_reward_model(model, episode)
 
                 param, acf_val = optimizer.next_params()
                 Logger.info(f"{episode}/{self.n_opt_samples} next k: {param}")
@@ -107,14 +115,26 @@ class Trainer:
             if self.logger is not None:
                 self.logger.log(param, reward, self.reward_max, acf_val, backup_triggered, self.data, info, episode)
 
+            # Each round builds a fresh GP whose posterior caches sit in reference cycles; without an explicit
+            # collection they pile up for several rounds (GBs on a 2000-point candidate set) before Python's GC runs.
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
     def refit_reward_model(self, model: ModelListGP, episode: int):
         if self.refit_interval != 0 and episode % self.refit_interval == 0:
             # Only fit reward model
-            mll = ExactMarginalLogLikelihood(model.models[0].likelihood, model.models[0])
+            # SciPy's line search can fail on the single-precision kernel
+            # parameters used by the demos, especially for nearly noiseless data.
+            mll = ExactMarginalLogLikelihood(model.models[0].likelihood, model.models[0]).double()
             Logger.info("Fitting GP")
-            fit_gpytorch_mll(mll)
+            previous_state = deepcopy(model.models[0].state_dict())
+            try:
+                fit_gpytorch_mll(mll)
+            except ModelFittingError:
+                model.models[0].load_state_dict(previous_state)
+                Logger.warn(f"Reward GP fit failed at round {episode}; retaining previous hyperparameters")
+                return False
             Logger.info(f"New Lenghtscale: {model.models[0].covar_module.base_kernel.lengthscale}")
-            self.state_dict = model.state_dict()
+            return True
+        return False

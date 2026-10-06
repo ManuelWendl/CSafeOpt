@@ -14,6 +14,9 @@ class PendulumGymEnv(Environment):
         super().__init__(render_mode)
 
         self.c = config
+        self.reward_scale = float(config.get("reward_scale", 1.0))
+        if not np.isfinite(self.reward_scale) or self.reward_scale <= 0:
+            raise ValueError("reward_scale must be finite and positive")
         self.i = 0
 
         ideal_env = PendulumGymEnvWithDynamics(pendulumConfig, U_ideal, render_mode=None)
@@ -42,7 +45,7 @@ class PendulumGymEnv(Environment):
         self.i += 1
 
         norm = np.linalg.norm(self.idealTrajectory[self.i, :] - observation)
-        loss = -0.5 * norm * norm
+        loss = -0.5 * self.reward_scale * norm * norm
         c2 = 2.2 - np.abs(observation[1])
 
         rewards = np.array([loss, c2])

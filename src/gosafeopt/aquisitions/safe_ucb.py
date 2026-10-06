@@ -1,5 +1,6 @@
 from typing import Optional
 
+import torch
 from torch import Tensor
 
 from gosafeopt.aquisitions.base_aquisition import BaseAquisition
@@ -27,4 +28,5 @@ class SafeUCB(BaseAquisition):
 
         values += self.soft_penalty(slack)
 
-        return values
+        safe = torch.all(l[:, 1:] > self.fmin[1:], dim=1)
+        return torch.where(safe, values, torch.full_like(values, -torch.inf))

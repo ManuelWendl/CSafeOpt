@@ -1,41 +1,3 @@
-"""A "mirage" benchmark: the global reward maximum sits just past a genuine,
-permanent safety wall immediately to the left of the safe seed, reached by a
-real, continuously-rising reward gradient the whole way there; a lower (but
-real, safely reachable) local maximum sits behind an ordinary tight-but-safe
-bottleneck to the right, at the far end of a boring valley with no gradient
-pointing toward it at all.
-
-This isolates the mirror-image failure mode to reward_desert_demo.py's. There,
-GOOSE degraded to plain safe-UCB because nothing was ever unsafe, so its
-expansion trigger never fired. Here, something is *always* unsafe -- but it's
-the wrong thing, and it's the thing every round of evidence keeps pointing
-toward. GOOSE's oracle (src/gosafeopt/aquisitions/goose.py's plain GP-UCB
-restricted to the optimistic safe set) has no notion of "this target is a
-lost cause": every round it re-maximizes reward over whatever still *looks*
-optimistically safe, and as the safe frontier creeps left toward the wall it
-keeps observing genuinely rising reward right up to the boundary -- strong,
-well-founded evidence to keep pushing that way, extrapolating into exactly
-the direction that's truly closed off. Safe Expansion (Algorithm 2) then
-spends its budget building Lipschitz-certified bridges toward that single
-goal-directed target one cautious step at a time, and never even considers
-the bottleneck on the right: GOOSE's `priority` (goose.py's
-`_safe_expansion_scores`, eq. 25) always ranks candidates purely by distance
-to the oracle's current suggestion, which stays pinned to the mirage for as
-long as it remains un-disproven at the model's own kernel lengthscale.
-
-SafeOpt/CSafeOpt/GoSafeOpt don't share this blind spot: their own expander
-sets (safe_opt.py's `expanders`, cum_safe_opt.py's reward-std gate) are keyed
-to *any* safe point with unresolved constraint or reward uncertainty, not to
-a single reward-maximizing target. The bottleneck on the right is just as
-good an expander candidate as the wall on the left, so they keep sampling
-both frontiers and settle on whichever safely certified point actually pays
-off best -- the honest local peak, once it's found -- while GOOSE's oracle
-never lets it look right in the first place.
-
-Reuses the paper-style plotting and Chowdhury-Gopalan infrastructure from
-bottleneck_demo.py rather than duplicating it.
-"""
-
 import random
 from pathlib import Path
 from typing import List, Optional
@@ -45,6 +7,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
+from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
 import pandas as pd
 import seaborn.objects as so
 import torch
@@ -53,10 +17,13 @@ from bottleneck_demo import (
     MARKERS,
     PALETTE,
     GrowingGoose,
+    GrowingISEBO,
     GrowingGoSafeOpt,
     GrowingSafeOpt,
     GrowingSafeUCB,
+    StageOpt,
     InstrumentedCSafeOpt,
+    InstrumentedCSafeOptSimple,
     _apply_theme,
     _draw_order,
     _legend,
@@ -66,6 +33,7 @@ from bottleneck_demo import (
     reset_global_state,
 )
 from torch import Tensor
+from trajectories_3d import COLUMN_FIGSIZE, Landscape, plot_trajectories
 
 import gosafeopt
 from gosafeopt.aquisitions.base_aquisition import BaseAquisition
@@ -84,24 +52,18 @@ app = typer.Typer()
 DOMAIN = (0.0, 13.0)
 SEED_X = 6.5
 
-# --- the mirage: a real, higher peak sitting behind a real, permanent wall,
-# with reward rising continuously (no dip) the entire way from the seed. ---
-LURE_X = 1.5  # the unreachable global reward maximum
+LURE_X = 1.5
 LURE_AMPLITUDE = 5.0
-LURE_WIDTH = 2.6  # wide enough that its rising slope reaches all the way to the seed, no flat/dip gap
-WALL_X = 5.1  # sigmoid transition center of the safety cliff
+LURE_WIDTH = 2.6
+WALL_X = 5.1
 WALL_SCALE = 0.4
 WALL_DEPTH = 1.6
-# True (numerically verified) safe/unsafe crossing of the wall, for plotting
-# and for confirming the safe-reachable ceiling below.
 WALL_BOUNDARY_X = 4.9994
 
-# --- the honest route: an ordinary valley, a tight-but-safe bottleneck, and
-# a real (lower) local peak, the same shape bottleneck_demo.py uses. ---
 BOTTLENECK = (7.75, 10.75)
 BOTTLENECK_CENTER = 9.25
 BOTTLENECK_WIDTH = 0.5
-BOTTLENECK_DEPTH = 0.83  # min constraint margin at the center ~= 0.07
+BOTTLENECK_DEPTH = 0.83
 LOCAL_PEAK_X = 11.5
 LOCAL_AMPLITUDE = 3.0
 LOCAL_WIDTH = 0.6
@@ -120,12 +82,6 @@ def reward_fn(x: np.ndarray) -> np.ndarray:
 
 
 def constraint_fn(x: np.ndarray) -> np.ndarray:
-    # A one-sided cliff (not a symmetric dip): everything comfortably left of
-    # WALL_X collapses to a large, permanent constraint violation and stays
-    # there all the way to the domain edge -- x=0 is exactly as unsafe as
-    # x=LURE_X, so there is no safe island beyond the wall to "discover" by
-    # luck. The bottleneck is a separate, ordinary symmetric dip: safe
-    # throughout, just barely so at its center.
     wall = WALL_DEPTH / (1.0 + np.exp(-(WALL_X - x) / WALL_SCALE))
     bottleneck = BOTTLENECK_DEPTH * np.exp(-((x - BOTTLENECK_CENTER) ** 2) / (2 * BOTTLENECK_WIDTH**2))
     return 0.9 - wall - bottleneck
@@ -140,8 +96,6 @@ class MirageEnv(Environment):
 
     def step(self, k):
         x = float(k[0])
-        # Experiment.rollout divides by len(trajectory) == 2 for a single-step
-        # episode; double the raw values so data.train_y matches reward_fn/constraint_fn.
         reward = np.array([2 * reward_fn(x), 2 * constraint_fn(x)])
         return np.array([x]), reward, True, False, {}
 
@@ -156,45 +110,26 @@ CONFIG = {
     "domain_start": [DOMAIN[0]],
     "domain_end": [DOMAIN[1]],
     "model": {
-        # NB: Normalize() maps x into [0,1] before the kernel sees it, so this
-        # lengthscale is a *fraction of the domain width*, not raw x-units --
-        # here 0.08 * 13 =~ 1.04 raw units. Two separate reasons to keep it
-        # small, not one:
-        #  (a) Kept below the ~3.6-unit gap from the seed to the wall so a
-        #      low sample taken while crossing the honest bottleneck can't
-        #      smear the model's belief all the way over to the lure's side
-        #      (too large washes out the local rising-gradient structure this
-        #      benchmark needs).
-        #  (b) Kept close to WALL_SCALE=0.4 (the true cliff's own transition
-        #      width). A lengthscale much wider than the feature it's
-        #      modeling makes the GP under-estimate how fast the constraint
-        #      actually drops near the boundary -- it extrapolates the first
-        #      confidently-safe sample almost linearly forward instead of
-        #      anticipating the cliff, which is exactly what produces
-        #      large, dangerous constraint violations (order -0.5 to -0.7)
-        #      in the first handful of rounds. Below ~1.3 raw units those
-        #      violations vanish; what's left is sub-0.05 boundary noise
-        #      right at the true crossing (WALL_BOUNDARY_X) as the pessimistic
-        #      bound tracks it tightly -- expected, not a bug, and present
-        #      in bottleneck_demo.py/double_bottleneck_demo.py too.
         "lenghtscale": [0.08],
         "normalize_input": True,
         "normalize_output": False,
+        "outputscale": 0.6931471805599453,
         "likelihood_noise": 1e-4,
     },
     "Optimization": {
         "set_size": 6000,
         "set_init": "random",
         "max_global_steps_without_progress_tolerance": 0.9,
-        "max_global_steps_without_progress": 10_000,  # effectively disabled
+        "max_global_steps_without_progress": 10_000,
     },
     "SafeOpt": {"scale_beta": 1.0, "beta": 9},
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
-    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1, "alpha": 0.55, "zeta": 0.01},
+    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1, "alpha": 0.75, "zeta": 0.01, "lipschitz": 1.5},
+    "CSafeOptSimple": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.3, "alpha": 0.75, "zeta": 0.01},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
-    # lipschitz=1.5 safely bounds constraint_fn's true max slope (~1.01, from
-    # the bottleneck dip; the wall's own max slope is ~0.8).
-    "GoOSE": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1.5, "epsilon": 0.05},
+    "GoOSE": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1.5, "epsilon": 0.1},
+    "StageOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1},
+    "ISE-BO": {"scale_beta": 1.0, "beta": 9},
 }
 
 
@@ -208,22 +143,36 @@ def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float]
         if alpha is not None:
             kwargs["alpha"] = alpha
         return InstrumentedCSafeOpt(**kwargs, dim_obs=dim_obs)
+    elif name == "CSafeOptSimple":
+        kwargs = dict(CONFIG["CSafeOptSimple"])
+        if alpha is not None:
+            kwargs["alpha"] = alpha
+        return InstrumentedCSafeOptSimple(**kwargs, dim_obs=dim_obs)
     elif name == "GoSafeOpt":
         return GrowingGoSafeOpt(**CONFIG["GoSafeOpt"], dim_obs=dim_obs, data=data)
     elif name == "GoOSE":
         return GrowingGoose(**CONFIG["GoOSE"], dim_obs=dim_obs)
+    elif name == "StageOpt":
+        kwargs = dict(CONFIG["StageOpt"])
+        eta = kwargs.pop("epsilon")
+        return StageOpt(**kwargs, expansion_eta=eta, dim_obs=dim_obs)
+    elif name == "ISE-BO":
+        return GrowingISEBO(**CONFIG["ISE-BO"], dim_obs=dim_obs, data=data)
     else:
         raise ValueError(f"Unknown aquisition {name}")
 
 
-def run(name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None) -> tuple:
+def run(
+    name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None, initial_point: Optional[tuple] = None,
+    aquisition_override: Optional[BaseAquisition] = None, data: Optional[Data] = None,
+) -> tuple:
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     reset_global_state()
 
-    data = Data()
-    x_safe = torch.tensor([[SEED_X]])
+    data = Data() if data is None else data
+    x_safe = torch.tensor([[SEED_X if initial_point is None else initial_point[0]]])
 
     environment = MirageEnv(render_mode=None)
     experiment = Experiment(CONFIG, environment, data=data, backup=None)
@@ -237,7 +186,9 @@ def run(name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None)
         data=data,
     )
 
-    aquisition = build_aquisition(name, CONFIG["dim_obs"], data, alpha=alpha)
+    aquisition = aquisition_override if aquisition_override is not None else build_aquisition(
+        name, CONFIG["dim_obs"], data, alpha=alpha
+    )
 
     model = ModelGenerator(
         **CONFIG["model"],
@@ -264,35 +215,17 @@ def run(name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None)
 
 
 def unreachable_optimum(resolution: int = 200_000) -> float:
-    """The global max of reward_fn, ignoring safety entirely -- the mirage itself."""
     xs = np.linspace(DOMAIN[0], DOMAIN[1], resolution)
     return float(reward_fn(xs).max())
 
 
 def true_optimum(resolution: int = 200_000) -> float:
-    """The best reward actually achievable without ever leaving the safe set --
-    i.e. the ceiling any *correct* safe algorithm can be judged against. Unlike
-    every other demo in this suite, this is deliberately *not* the unconstrained
-    max of reward_fn: that point (the mirage) is genuinely unsafe, so no safe
-    algorithm should ever reach it, and scoring regret against it would make
-    every algorithm look equally "bad" instead of isolating GOOSE specifically.
-    """
     xs = np.linspace(DOMAIN[0], DOMAIN[1], resolution)
     safe = constraint_fn(xs) > 0
     return float(reward_fn(xs)[safe].max())
 
 
-def plot_mirage(results: dict, out_path: str):
-    _apply_theme()
-
-    names = _legend_order(list(results.keys()))
-    style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
-    j_star = true_optimum()
-    j_mirage = unreachable_optimum()
-
-    fig, ((ax_landscape, ax_trace), (ax_regret, ax_threshold)) = plt.subplots(2, 2)
-
-    # --- landscape -----------------------------------------------------
+def _plot_landscape_and_trace(ax_landscape, ax_trace, results: dict, names: list, style: dict) -> None:
     xs = np.linspace(DOMAIN[0], DOMAIN[1], 800)
     landscape_df = pd.DataFrame(
         {
@@ -316,7 +249,6 @@ def plot_mirage(results: dict, out_path: str):
     ax_landscape.set_title("Mirage (red, unsafe) vs. honest bottleneck (gray, safe)")
     _legend(ax_landscape, curve_names, {curve_names[0]: (PALETTE[0], None), curve_names[1]: (PALETTE[7], None)})
 
-    # --- trace -----------------------------------------------------------
     trace_df = pd.concat(
         [
             pd.DataFrame({"round": np.arange(data.train_x.shape[0]), "chosen_x": data.train_x[:, 0].numpy(), "name": n})
@@ -332,7 +264,40 @@ def plot_mirage(results: dict, out_path: str):
     ax_trace.set_title("Point evaluated per round")
     _legend(ax_trace, names, style)
 
-    # --- cumulative regret (against the safe-reachable optimum) ------------
+
+def _landscape(j_star: float) -> Landscape:
+    return Landscape(
+        domain=DOMAIN,
+        reward=reward_fn,
+        constraint=constraint_fn,
+        j_star=j_star,
+        crossings=(BOTTLENECK[1],),
+        strips=((DOMAIN[0], WALL_BOUNDARY_X, "lightcoral", "unsafe (mirage)"), (*BOTTLENECK, "gainsboro", "bottleneck")),
+        z_ticks=(0, 2, 4),
+    )
+
+
+def plot_mirage(results: dict, out_path: str, trajectories_3d: bool = False, narrow: bool = False):
+    _apply_theme()
+
+    names = _legend_order(list(results.keys()))
+    style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
+    j_star = true_optimum()
+    j_mirage = unreachable_optimum()
+
+    if trajectories_3d:
+        width, height = plt.rcParams["figure.figsize"]
+        fig = plt.figure(figsize=COLUMN_FIGSIZE if narrow else (width, 1.11 * height))
+        top, bottom = fig.subfigures(2, 1, height_ratios=[1.8, 1] if narrow else [1.65, 1])
+        plot_trajectories(top, results, names, style, _landscape(j_star), compact=narrow)
+        ax_regret, ax_threshold = bottom.subplots(1, 2)
+    else:
+        fig, ((ax_landscape, ax_trace), (ax_regret, ax_threshold)) = plt.subplots(2, 2)
+        _plot_landscape_and_trace(ax_landscape, ax_trace, results, names, style)
+
+    n_rounds = max(data.train_y.shape[0] for data, _aq in results.values())
+    series_style = {"marker_step": max(5, n_rounds // 20), "pointsize": 3.0} if narrow else {}
+
     regret_df = pd.concat(
         [
             pd.DataFrame(
@@ -346,16 +311,21 @@ def plot_mirage(results: dict, out_path: str):
         ],
         ignore_index=True,
     )
-    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", _draw_order(names), style)
+    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", _draw_order(names), style, **series_style)
     ax_regret.set_xlabel("round")
     ax_regret.set_ylabel(r"cumulative regret $R_N$")
-    ax_regret.set_title(
-        rf"$R_N = \sum_t (J^\star_{{\mathrm{{safe}}}} - f(x_t))$, $J^\star_{{\mathrm{{safe}}}} = {j_star:.3f}$"
-        rf" (mirage $= {j_mirage:.3f}$)"
-    )
-    _legend(ax_regret, names, style)
+    if narrow:
+        ax_regret.set_title(rf"$J^\star_{{\mathrm{{safe}}}} = {j_star:.3f}$")
+    elif trajectories_3d:
+        ax_regret.set_title(rf"$J^\star_{{\mathrm{{safe}}}} = {j_star:.3f}$ (mirage $= {j_mirage:.3f}$)")
+    else:
+        ax_regret.set_title(
+            rf"$R_N = \sum_t (J^\star_{{\mathrm{{safe}}}} - f(x_t))$, $J^\star_{{\mathrm{{safe}}}} = {j_star:.3f}$"
+            rf" (mirage $= {j_mirage:.3f}$)"
+        )
+    if not trajectories_3d:
+        _legend(ax_regret, names, style)
 
-    # --- gate threshold (eta_t) -------------------------------------------
     threshold_frames = []
     crossing_lines = []
     for name, (data, aquisition) in results.items():
@@ -365,9 +335,6 @@ def plot_mirage(results: dict, out_path: str):
         rounds_h, _tau_h, eta_h = zip(*history)
         threshold_frames.append(pd.DataFrame({"round": rounds_h, "value": eta_h, "name": name}))
 
-        # threshold_history[i] holds (round i+1, tau, eta); data.train_x[episode] is the point
-        # chosen using that round's threshold (episode 0 is the seed, not chosen via the gate at
-        # all, so episode e >= 1 was picked using threshold_history[e - 1]).
         chosen_x = data.train_x[:, 0].numpy()
         crossed_mask = chosen_x > BOTTLENECK[1]
         if crossed_mask.any():
@@ -378,19 +345,24 @@ def plot_mirage(results: dict, out_path: str):
     if threshold_frames:
         threshold_df = pd.concat(threshold_frames, ignore_index=True)
         gate_names = [n for n in names if n in threshold_df["name"].unique()]
-        _plot_series(ax_threshold, threshold_df, "round", "value", _draw_order(gate_names), style, pointsize=3.5)
+        _plot_series(
+            ax_threshold, threshold_df, "round", "value", _draw_order(gate_names), style,
+            **{"pointsize": 3.5, **series_style},
+        )
 
         for name, _first_cross_episode, eta_at_crossing in crossing_lines:
             ax_threshold.axhline(eta_at_crossing, color=style[name][0], linestyle="-.", linewidth=1.6, alpha=0.7)
 
-        _legend(ax_threshold, gate_names, style)
+        if not trajectories_3d:
+            _legend(ax_threshold, gate_names, style)
 
     ax_threshold.set_xlabel("round")
     ax_threshold.set_ylabel(r"$\eta_t$")
     ax_threshold.set_title(r"$\eta_t = 2\varepsilon\,\beta_t^{1/2-\alpha}$")
 
     for ax in fig.get_axes():
-        _style_axis(ax)
+        if ax.name != "3d":
+            _style_axis(ax)
 
     fig.savefig(out_path)
     pdf_path = str(Path(out_path).with_suffix(".pdf"))
@@ -413,6 +385,180 @@ def _print_summary(name: str, data, j_star: float):
     )
 
 
+class GateSnapshotCSafeOpt(InstrumentedCSafeOpt):
+
+    def __init__(self, *args, snapshot_rounds=(), data: Optional[Data] = None, resolution: int = 2000, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.snapshot_rounds = set(snapshot_rounds)
+        self.data = data
+        self.grid = torch.linspace(DOMAIN[0], DOMAIN[1], resolution, dtype=torch.float64).reshape(-1, 1)
+        self.snapshots: dict = {}
+
+    def evaluate(self, x: Tensor, step: int = 0) -> Tensor:
+        scores = super().evaluate(x, step)
+        if self.t in self.snapshot_rounds:
+            with torch.no_grad():
+                terms = self.acquisition_terms(self.grid)
+            self.snapshots[self.t] = {
+                "x": self.grid[:, 0].numpy(),
+                "safe": terms["safe"].numpy(),
+                "expander": terms["expander"].numpy(),
+                "ut": terms["ut"].numpy(),
+                "gate": (terms["kappa"] * terms["normalized_gate"]).numpy(),
+                "kappa": float(terms["kappa"]),
+                "tau": float(terms["tau"]),
+                "lower": terms["lower"].numpy(),
+                "upper": terms["upper"].numpy(),
+                "observed": self.data.train_x[:, 0].numpy().copy() if self.data is not None else None,
+                "observed_y": self.data.train_y.numpy().copy() if self.data is not None else None,
+            }
+        return scores
+
+
+def plot_gate_acquisition(snapshots: dict, out_path: str, x_max: Optional[float] = None) -> None:
+    from matplotlib.patches import Patch
+
+    ucb_color, gate_color, reward_color, constraint_color = PALETTE[2], PALETTE[0], "0.35", PALETTE[7]
+    uncertified_color = "0.93"
+    truth_style = {"linewidth": 0.9, "linestyle": (0, (3, 2)), "alpha": 0.8, "zorder": 2}
+    label_box = {"boxstyle": "round,pad=0.15", "facecolor": "white", "edgecolor": "none", "alpha": 0.85}
+    _apply_theme()
+    rounds = sorted(snapshots)
+    fig, axes = plt.subplots(len(rounds), 1, sharex=True, squeeze=False,
+                             figsize=(COLUMN_FIGSIZE[0], 0.5 + 1.25 * len(rounds)), constrained_layout=True)
+    axes = axes[:, 0]
+
+    certified = np.concatenate([snapshots[t]["x"][snapshots[t]["safe"]] for t in rounds])
+    x_lo = max(DOMAIN[0], certified.min() - 0.7)
+    x_hi = min(DOMAIN[1], max(certified.max() + 1.4, LOCAL_PEAK_X + 0.35))
+    if x_max is not None:
+        x_hi = min(x_hi, x_max)
+    xs = np.linspace(x_lo, x_hi, 800)
+
+    for ax, t in zip(axes, rounds):
+        snap = snapshots[t]
+        x, safe, lower, upper = snap["x"], snap["safe"], snap["lower"], snap["upper"]
+        ut = np.where(safe, snap["ut"], np.nan)
+        total = ut + np.where(safe, snap["gate"], np.nan)
+        y_min = min(constraint_fn(xs).min(), -0.5) - 0.25
+        y_max = max(np.nanmax(total), reward_fn(np.array(LOCAL_PEAK_X))) + 0.7
+
+        edges = np.flatnonzero(np.diff(np.r_[0, (~safe).astype(int), 0]))
+        dx = x[1] - x[0]
+        spans = [(x[start] - dx / 2, x[stop - 1] + dx / 2) for start, stop in zip(edges[::2], edges[1::2])]
+        for lo, hi in spans:
+            ax.axvspan(lo, hi, color=uncertified_color, linewidth=0, zorder=0)
+
+        ax.fill_between(x, lower[:, 1], upper[:, 1], color=constraint_color, alpha=0.18, linewidth=0, zorder=1)
+        ax.axhline(0.0, color="black", linewidth=0.6, zorder=2)
+        ax.plot(xs, constraint_fn(xs), color=constraint_color, **truth_style)
+
+        ax.fill_between(x, lower[:, 0], upper[:, 0], color=reward_color, alpha=0.18, linewidth=0, zorder=1)
+        ax.plot(xs, reward_fn(xs), color=reward_color, **truth_style)
+
+        ax.fill_between(x, ut, total, where=safe & (snap["gate"] > 0), color=gate_color, alpha=0.45,
+                        linewidth=0, zorder=3)
+        ax.plot(x, total, color=gate_color, linewidth=1.0, zorder=3)
+        ax.fill_between(x, 0.0, 0.035, where=safe & (snap["gate"] > 0), color=gate_color, linewidth=0,
+                        transform=ax.get_xaxis_transform(), zorder=5)
+        ax.plot(x, ut, color=ucb_color, linewidth=1.8, zorder=4)
+        i_ucb, i_total = np.nanargmax(ut), np.nanargmax(total)
+        ax.plot(x[i_ucb], ut[i_ucb], "o", markersize=5, markerfacecolor="white", markeredgecolor=ucb_color,
+                markeredgewidth=1.2, zorder=6)
+        ax.plot(x[i_total], total[i_total], "*", markersize=8, color=gate_color, markeredgecolor="black",
+                markeredgewidth=0.5, zorder=6)
+        i_min = np.nanargmin(ut)
+        width = x_hi - x_lo
+        x_gate_arrow, x_range_arrow = x[i_total] + 0.02 * width, x[i_total] + 0.22 * width
+        range_style = {"color": "0.5", "linewidth": 0.4, "linestyle": (0, (2, 1.5)), "zorder": 5}
+        ax.hlines(ut[i_ucb], x[i_ucb], x_range_arrow, **range_style)
+        ax.hlines(ut[i_min], x[i_min], x_range_arrow, **range_style)
+        double_arrow = {"arrowstyle": "<->", "linewidth": 0.8, "shrinkA": 0, "shrinkB": 0, "mutation_scale": 6}
+        ax.annotate("", (x_gate_arrow, total[i_total]), xytext=(x_gate_arrow, ut[i_total]),
+                    arrowprops={**double_arrow, "color": gate_color}, zorder=7)
+        ax.annotate("", (x_range_arrow, ut[i_ucb]), xytext=(x_range_arrow, ut[i_min]),
+                    arrowprops={**double_arrow, "color": ucb_color}, zorder=7)
+        pieces = [TextArea(text, textprops={"fontsize": 7, "color": color})
+                  for text, color in ((r"$\kappa_t$", gate_color), (r"$>$", "0.2"), (r"$\Delta u_t$", ucb_color))]
+        ax.add_artist(AnnotationBbox(
+            HPacker(children=pieces, align="baseline", sep=2.5, pad=0),
+            (0.5 * (x_gate_arrow + x_range_arrow), 0.5 * (ut[i_ucb] + ut[i_min])),
+            frameon=True, pad=0.25, zorder=7,
+            bboxprops={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "none", "alpha": 0.85},
+        ))
+
+        arrow = {"arrowstyle": "-", "color": "0.3", "linewidth": 0.5, "shrinkA": 0, "shrinkB": 3}
+        ax.annotate("UCB", (x[i_ucb], ut[i_ucb]), xytext=(8, 10), textcoords="offset points",
+                    ha="left", fontsize=7, color=ucb_color, arrowprops=arrow, bbox=label_box, zorder=7)
+        ax.annotate(r"$A_t^{(\alpha)}(x)$", (x[i_total], total[i_total]), xytext=(-10, 6),
+                    textcoords="offset points", ha="right", va="bottom", fontsize=7,
+                    color=gate_color, arrowprops=arrow, bbox=label_box, zorder=7)
+
+        if snap["observed"] is not None:
+            for i, color in ((0, reward_color), (1, constraint_color)):
+                ax.plot(snap["observed"], snap["observed_y"][:, i], "o", markersize=3, color=color,
+                        markeredgecolor="white", markeredgewidth=0.4, zorder=5)
+
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_min, y_max)
+        ax.set_ylabel("value")
+        if len(rounds) > 1:
+            ax.set_title(rf"Round $t={t}$")
+        _style_axis(ax)
+        ax.grid(False)
+        print(f"round {t}: kappa={snap['kappa']:.3f}, tau={snap['tau']:.4f}, "
+              f"S_t covers [{x[safe].min():.2f}, {x[safe].max():.2f}], "
+              f"UCB argmax x={x[i_ucb]:.2f}, gated argmax x={x[i_total]:.2f}")
+    axes[-1].set_xlabel(r"$x$")
+
+    handles = [
+        Line2D([], [], color=reward_color, **{**truth_style, "zorder": None}, label=r"$f(x)$"),
+        Patch(facecolor=reward_color, alpha=0.35, label="reward GP"),
+        Line2D([], [], color=constraint_color, **{**truth_style, "zorder": None}, label=r"$c(x)$"),
+        Patch(facecolor=constraint_color, alpha=0.35, label="constraint GP"),
+        Line2D([], [], color=ucb_color, linewidth=1.8, label=r"$u_t(x)$"),
+        Patch(facecolor=gate_color, alpha=0.6, label=r"$\kappa_t\,\bar q_t^{(\alpha)}(x)$"),
+        Line2D([], [], color=gate_color, linewidth=3.0, solid_capstyle="butt", label=r"$q_t^{(\alpha)}(x) > 0$"),
+        Patch(facecolor=uncertified_color, edgecolor="0.7", linewidth=0.4, label="not certified"),
+    ]
+    fig.legend(handles=handles, loc="outside upper center", ncol=4, frameon=False, fontsize=7,
+               handlelength=1.3, columnspacing=0.9, handletextpad=0.4, labelspacing=0.3)
+
+    fig.savefig(out_path)
+    pdf_path = str(Path(out_path).with_suffix(".pdf"))
+    fig.savefig(pdf_path)
+    plt.close(fig)
+    print(f"Saved gated-acquisition plot to {out_path} (and {pdf_path})")
+
+
+@app.command()
+def gate_acquisition(
+    rounds: List[int] = typer.Option([10], min=1, help="Repeat --rounds for each panel"),
+    seed: int = typer.Option(42, help="RNG seed"),
+    out: str = f"{Path().absolute()}/examples/mirage_gate_acquisition.png",
+    lengthscale: Optional[float] = typer.Option(None, help="Override the (reward) GP lengthscale, normalized"),
+    constraint_lengthscale: Optional[float] = typer.Option(None, help="Separate constraint GP lengthscale, normalized"),
+    alpha: Optional[float] = typer.Option(None, help="Override CSafeOpt's alpha"),
+    epsilon: Optional[float] = typer.Option(None, help="Override CSafeOpt's epsilon"),
+    x_max: Optional[float] = typer.Option(None, help="Right edge of the x-axis (default: just past the optimum)"),
+):
+    Logger.set_verbosity(2)
+    if lengthscale is not None:
+        CONFIG["model"]["lenghtscale"] = [lengthscale]
+    if constraint_lengthscale is not None:
+        CONFIG["model"]["constraint_lengthscale"] = [constraint_lengthscale]
+    kwargs = dict(CONFIG["CSafeOpt"])
+    if alpha is not None:
+        kwargs["alpha"] = alpha
+    if epsilon is not None:
+        kwargs["epsilon"] = epsilon
+    print(f"model: {CONFIG['model']}, CSafeOpt: {kwargs}")
+    data = Data()
+    aquisition = GateSnapshotCSafeOpt(**kwargs, dim_obs=CONFIG["dim_obs"], snapshot_rounds=rounds, data=data)
+    run("CSafeOpt", seed, max(rounds) + 1, aquisition_override=aquisition, data=data)
+    plot_gate_acquisition(aquisition.snapshots, out, x_max=x_max)
+
+
 @app.command()
 def mirage(
     n_opt_samples: int = typer.Option(200, help="Number of BO rounds for every run"),
@@ -421,6 +567,8 @@ def mirage(
         ["SafeOpt", "SafeUCB", "CSafeOpt", "GoOSE"], help="Which acquisitions to run"
     ),
     out: str = f"{Path().absolute()}/examples/mirage.png",
+    trajectories_3d: bool = typer.Option(False, help="Replace the landscape/trace panels by one 3D panel per run"),
+    narrow: bool = typer.Option(False, help="Size the figure for one column of a two-column page"),
 ):
     Logger.set_verbosity(2)
     j_star = true_optimum()
@@ -431,7 +579,7 @@ def mirage(
         results[name] = (data, aquisition)
         _print_summary(name, data, j_star)
 
-    plot_mirage(results, out)
+    plot_mirage(results, out, trajectories_3d=trajectories_3d, narrow=narrow)
 
 
 if __name__ == "__main__":

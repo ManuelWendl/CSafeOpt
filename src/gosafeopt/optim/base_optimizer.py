@@ -123,6 +123,15 @@ class BaseOptimizer:
     def next_params(self):
         [x, reward] = self.optimize_steps()
 
+        if not torch.isfinite(reward).any():
+            # No candidate is certified safe, e.g. after an outlying observation has inflated the GP's output
+            # scale. The initial safe seed stays certified (S_0 is contained in every S_t, as in SafeOpt's safe
+            # set definition), so evaluate it instead of selecting an uncertified point.
+            if self.data.train_x is None or len(self.data.train_x) == 0:
+                raise RuntimeError("No candidate has a finite acquisition score and there is no safe seed to fall back to")
+            Logger.warn("No candidate has a finite acquisition score; evaluating the initial safe seed")
+            return [self.data.train_x[0].detach().to("cpu"), reward.max().detach().to("cpu")]
+
         next_param = x[torch.argmax(reward)]
         reward = reward.max()
 

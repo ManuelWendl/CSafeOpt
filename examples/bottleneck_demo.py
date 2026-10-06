@@ -1,13 +1,3 @@
-"""A hand-crafted 1D safe-optimization benchmark with a genuine bottleneck.
-
-The safe seed already sits at a mediocre local optimum. Reaching the much
-better optimum requires crossing a corridor that is low-reward (so plain
-reward-greedy UCB has no incentive to go there) but only barely safe (so it
-cannot be crossed without deliberately sampling near the safety boundary to
-shrink the confidence interval there first). This is the same structure as
-the "three-point safe chain" in Appendix A of the CSafeOpt write-up.
-"""
-
 import math
 import random
 from pathlib import Path
@@ -30,8 +20,10 @@ from tueplots import bundles, figsizes
 import gosafeopt
 from gosafeopt.aquisitions.base_aquisition import BaseAquisition
 from gosafeopt.aquisitions.cum_safe_opt import CSafeOpt
+from gosafeopt.aquisitions.cum_safe_opt_single_bonus import CSafeOptSimple
 from gosafeopt.aquisitions.go_safe_opt import GoSafeOpt
 from gosafeopt.aquisitions.goose import Goose
+from gosafeopt.aquisitions.ise_bo import ISEBO
 from gosafeopt.aquisitions.safe_opt import SafeOpt
 from gosafeopt.aquisitions.safe_ucb import SafeUCB
 from gosafeopt.experiments.environment import Environment
@@ -44,8 +36,6 @@ from gosafeopt.tools.logger import Logger
 from gosafeopt.trainer import Trainer
 from torch import Tensor
 
-# GridOpt/SwarmOpt build domain-bound tensors on the CPU and never move them onto
-# gosafeopt.device; force CPU here so this stays consistent (see examples/compare.py).
 gosafeopt.device = torch.device("cpu")
 
 app = typer.Typer()
@@ -54,9 +44,6 @@ SEED_X = 0.5
 VALLEY = (1.5, 4.0)
 DOMAIN = (0.0, 6.0)
 
-# Paper-style plotting: tueplots (ICLR bundle) + seaborn.objects, matching the
-# house style used for the ss2r WandB plots (fixed categorical palette, small
-# markers on thin lines, LaTeX serif text, light grid, heavier spines).
 PALETTE = [
     "#5F4690",
     "#1D6996",
@@ -105,12 +92,7 @@ def _legend(ax, names, style, **kwargs):
     ax.legend(handles, names, **kwargs)
 
 
-def _plot_series(ax, df, x, y, names, style, linewidth=1.8, pointsize=4.0, edgewidth=0.5):
-    """Draw one continuous line per series (df's "name" column), with point
-    markers shown only every 5th round once a series has more than 50 rounds
-    -- denser marker sets get visually noisy without adding information the
-    line doesn't already show.
-    """
+def _plot_series(ax, df, x, y, names, style, linewidth=1.8, pointsize=4.0, edgewidth=0.5, marker_step=None):
     so.Plot(df, x=x, y=y, color="name").add(so.Line(linewidth=linewidth), legend=False).scale(
         color=so.Nominal(values=[style[n][0] for n in names], order=names)
     ).on(ax).plot()
@@ -118,7 +100,7 @@ def _plot_series(ax, df, x, y, names, style, linewidth=1.8, pointsize=4.0, edgew
     marker_frames = []
     for n in names:
         sub = df[df["name"] == n]
-        step = 5 if len(sub) > 50 else 1
+        step = marker_step or (5 if len(sub) > 50 else 1)
         marker_frames.append(sub.iloc[::step])
     marker_df = pd.concat(marker_frames, ignore_index=True)
 
@@ -131,24 +113,12 @@ def _plot_series(ax, df, x, y, names, style, linewidth=1.8, pointsize=4.0, edgew
 
 
 def _legend_order(names: list, first: str = "CSafeOpt") -> list:
-    """`names` with `first` moved to the front.
-
-    The order legends and color/marker assignment (style dicts) should use,
-    so CSafeOpt reads first and gets PALETTE[0].
-    """
     if first not in names:
         return list(names)
     return [first] + [n for n in names if n != first]
 
 
 def _draw_order(names: list, last: str = "CSafeOpt") -> list:
-    """`names` with `last` moved to the end.
-
-    _plot_series draws/z-orders series in the order given (so.Nominal's
-    `order=` controls draw sequence, confirmed empirically: later entries
-    render on top) -- pass this, not _legend_order's result, to _plot_series
-    so CSafeOpt is legend-first but drawn on top.
-    """
     if last not in names:
         return list(names)
     return [n for n in names if n != last] + [last]
@@ -162,12 +132,26 @@ def reward_fn(x: np.ndarray) -> np.ndarray:
     )
 
 
+CONSTRAINT_OFFSET = 0.15
+
+
+def _constraint_bumps(x: np.ndarray) -> np.ndarray:
+    return 0.9 * np.exp(-((x - SEED_X) ** 2) / (2 * 1.0**2)) + 0.9 * np.exp(-((x - 5.0) ** 2) / (2 * 1.0**2))
+
+
 def constraint_fn(x: np.ndarray) -> np.ndarray:
-    return (
-        0.9 * np.exp(-((x - SEED_X) ** 2) / (2 * 1.0**2))
-        + 0.9 * np.exp(-((x - 5.0) ** 2) / (2 * 1.0**2))
-        + 0.15
-    )
+    return _constraint_bumps(x) + CONSTRAINT_OFFSET
+
+
+def bottleneck_margin(resolution: int = 100_001) -> float:
+    xs = np.linspace(*VALLEY, resolution)
+    return float(constraint_fn(xs).min())
+
+
+def set_bottleneck_margin(margin: float) -> None:
+    global CONSTRAINT_OFFSET
+    xs = np.linspace(*VALLEY, 100_001)
+    CONSTRAINT_OFFSET = margin - float(_constraint_bumps(xs).min())
 
 
 class BottleneckEnv(Environment):
@@ -179,9 +163,6 @@ class BottleneckEnv(Environment):
 
     def step(self, k):
         x = float(k[0])
-        # Experiment.rollout divides by len(trajectory), which is 2 for a
-        # single-step episode (the reset observation plus this one); double
-        # the raw values here so data.train_y matches reward_fn/constraint_fn.
         reward = np.array([2 * reward_fn(x), 2 * constraint_fn(x)])
         return np.array([x]), reward, True, False, {}
 
@@ -229,14 +210,85 @@ class GrowingGoose(ChowdhuryGopalanBeta, Goose):
     pass
 
 
-class InstrumentedCSafeOpt(CSafeOpt):
-    """Records tau_t and eta_t each round for plotting.
+class GrowingISEBO(ChowdhuryGopalanBeta, ISEBO):
+    pass
 
-    tau_t = epsilon / beta_t^alpha (eq. 29) is the raw threshold the gate
-    applies to sigma(x). eta_t = 2*sqrt(beta_t)*tau_t (eq. 43) is the
-    confidence-width tolerance it corresponds to -- the quantity Lemma 3
-    connects to the comparator class Pi_eta_t actually being targeted.
-    """
+
+class StageOpt(GrowingSafeOpt):
+
+    def __init__(self, *args, expansion_rounds: int = 50,
+                 expansion_eta: Optional[float] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if expansion_rounds < 1:
+            raise ValueError("expansion_rounds must be positive")
+        if expansion_eta is not None and (not np.isfinite(expansion_eta) or expansion_eta <= 0):
+            raise ValueError("expansion_eta must be finite and positive")
+        self.expansion_rounds = expansion_rounds
+        self.expansion_eta = expansion_eta
+        self.expanding = True
+        self.completed_queries = 0
+        self.activity_history = []
+        self.width_history = []
+        self.switch_after_query = None
+        self.before_optimization()
+
+    def before_optimization(self) -> None:
+        self._max_constraint_width = 0.0
+        self._saw_safe_candidate = False
+        self._invalid_width = False
+
+    def get_confidence_interval(self, posterior):
+        lower, upper = super().get_confidence_interval(posterior)
+        if self.expanding and self.expansion_eta is not None:
+            safe = torch.all(lower[:, 1:] > self.fmin[1:], dim=1)
+            if safe.any():
+                widths = (upper[safe, 1:] - lower[safe, 1:])
+                self._saw_safe_candidate = True
+                self._invalid_width |= not bool(torch.isfinite(widths).all())
+                self._max_constraint_width = max(self._max_constraint_width, float(widths.max()))
+        return lower, upper
+
+    def evaluate(self, x: Tensor, step: int = 0) -> Tensor:
+        if self.expanding:
+            return super().evaluate(x, step)
+        return GrowingSafeUCB.evaluate(self, x, step)
+
+    def is_internal_step(self, step: int = 0) -> bool:
+        return super().is_internal_step(step) if self.expanding else False
+
+    def after_optimization(self) -> None:
+        active = float(self.expanding)
+        self.completed_queries += 1
+        self.activity_history.append((self.completed_queries, active, active))
+        width = (self._max_constraint_width if self.expanding and self.expansion_eta is not None
+                 and self._saw_safe_candidate and not self._invalid_width else float("nan"))
+        self.width_history.append((self.completed_queries, width))
+        if self.expansion_eta is None:
+            finished = self.completed_queries >= self.expansion_rounds
+        else:
+            finished = self._saw_safe_candidate and not self._invalid_width and width <= self.expansion_eta
+        if self.expanding and finished:
+            self.expanding = False
+            self.switch_after_query = self.completed_queries
+            self.steps = 1
+            print(f"StageOpt expansion ended after query {self.completed_queries}", flush=True)
+
+
+class InstrumentedCSafeOpt(CSafeOpt):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.threshold_history: list[tuple[int, float, float]] = []
+
+    def after_optimization(self) -> None:
+        beta_t = self.growing_beta()
+        tau_t = self.threshold()
+        eta_t = 2.0 * math.sqrt(beta_t) * tau_t
+        self.threshold_history.append((self.t, tau_t, eta_t))
+        super().after_optimization()
+
+
+class InstrumentedCSafeOptSimple(CSafeOptSimple):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -271,31 +323,32 @@ CONFIG = {
     "domain_start": [DOMAIN[0]],
     "domain_end": [DOMAIN[1]],
     "model": {
-        "lenghtscale": [0.6],
+        "lenghtscale": [0.1],
+        "constraint_lengthscale": [0.6],
+        "outputscale": 2.0,
         "normalize_input": True,
         "normalize_output": True,
         "likelihood_noise": 1e-4,
     },
     "Optimization": {
-        # "safe" mode proposes candidates via a hardcoded 1e-3 covariance jitter
-        # around the safe set's mean (base_optimizer.py), tuned for the pendulum
-        # example's much smaller parameter scale. On this domain it never
-        # reaches the bottleneck at all, so sample the full domain uniformly at
-        # random every round instead and let the acquisition decide.
         "set_size": 2000,
         "set_init": "random",
         "max_global_steps_without_progress_tolerance": 0.9,
-        "max_global_steps_without_progress": 10_000,  # effectively disabled
+        "max_global_steps_without_progress": 10_000,
     },
     "SafeOpt": {"scale_beta": 1.0, "beta": 9},
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
-    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.146, "alpha": 0.55, "zeta": 0.0},
+    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.146, "alpha": 0.55, "zeta": 0.0, "lipschitz": 1},
+    "CSafeOptSimple": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.146, "alpha": 0.55, "zeta": 0.0},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
-    "GoOSE": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1, "epsilon": 0.075},
+    "GoOSE": {"scale_beta": 1.0, "beta": 9, "lipschitz": 1, "epsilon": 0.146},
+    "StageOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.146},
+    "ISE-BO": {"scale_beta": 1.0, "beta": 9},
 }
 
 
-def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float] = None) -> BaseAquisition:
+def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float] = None,
+                     epsilon: Optional[float] = None) -> BaseAquisition:
     if name == "SafeOpt":
         return GrowingSafeOpt(**CONFIG["SafeOpt"], dim_obs=dim_obs)
     elif name == "SafeUCB":
@@ -304,16 +357,33 @@ def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float]
         kwargs = dict(CONFIG["CSafeOpt"])
         if alpha is not None:
             kwargs["alpha"] = alpha
+        if epsilon is not None:
+            kwargs["epsilon"] = epsilon
         return InstrumentedCSafeOpt(**kwargs, dim_obs=dim_obs)
+    elif name == "CSafeOptSimple":
+        kwargs = dict(CONFIG["CSafeOptSimple"])
+        if alpha is not None:
+            kwargs["alpha"] = alpha
+        return InstrumentedCSafeOptSimple(**kwargs, dim_obs=dim_obs)
     elif name == "GoSafeOpt":
         return GrowingGoSafeOpt(**CONFIG["GoSafeOpt"], dim_obs=dim_obs, data=data)
     elif name == "GoOSE":
-        return GrowingGoose(**CONFIG["GoOSE"], dim_obs=dim_obs)
+        kwargs = dict(CONFIG["GoOSE"])
+        if epsilon is not None:
+            kwargs["epsilon"] = epsilon
+        return GrowingGoose(**kwargs, dim_obs=dim_obs)
+    elif name == "StageOpt":
+        kwargs = dict(CONFIG["StageOpt"])
+        eta = kwargs.pop("epsilon")
+        return StageOpt(**kwargs, expansion_eta=eta if epsilon is None else epsilon, dim_obs=dim_obs)
+    elif name == "ISE-BO":
+        return GrowingISEBO(**CONFIG["ISE-BO"], dim_obs=dim_obs, data=data)
     else:
         raise ValueError(f"Unknown aquisition {name}")
 
 
-def run(name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None) -> tuple:
+def run(name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None,
+        epsilon: Optional[float] = None) -> tuple:
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -334,7 +404,7 @@ def run(name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None)
         data=data,
     )
 
-    aquisition = build_aquisition(name, CONFIG["dim_obs"], data, alpha=alpha)
+    aquisition = build_aquisition(name, CONFIG["dim_obs"], data, alpha=alpha, epsilon=epsilon)
 
     model = ModelGenerator(
         **CONFIG["model"],
@@ -374,7 +444,6 @@ def plot_bottleneck(results: dict, out_path: str):
 
     fig, ((ax_landscape, ax_trace), (ax_regret, ax_threshold)) = plt.subplots(2, 2)
 
-    # --- landscape ---------------------------------------------------------
     xs = np.linspace(DOMAIN[0], DOMAIN[1], 400)
     landscape_df = pd.DataFrame(
         {
@@ -395,7 +464,6 @@ def plot_bottleneck(results: dict, out_path: str):
     ax_landscape.set_title("True reward / constraint landscape")
     _legend(ax_landscape, curve_names, {curve_names[0]: (PALETTE[0], None), curve_names[1]: (PALETTE[7], None)})
 
-    # --- trace ---------------------------------------------------------------
     trace_df = pd.concat(
         [
             pd.DataFrame({"round": np.arange(data.train_x.shape[0]), "chosen_x": data.train_x[:, 0].numpy(), "name": n})
@@ -410,7 +478,6 @@ def plot_bottleneck(results: dict, out_path: str):
     ax_trace.set_title("Point evaluated per round")
     _legend(ax_trace, names, style)
 
-    # --- cumulative regret -----------------------------------------------
     regret_df = pd.concat(
         [
             pd.DataFrame(
@@ -430,8 +497,6 @@ def plot_bottleneck(results: dict, out_path: str):
     ax_regret.set_title(rf"$R_N = \sum_t (J^\star - f(x_t))$, $J^\star = {j_star:.3f}$")
     _legend(ax_regret, names, style)
 
-    # --- gate threshold (eta_t) -------------------------------------------
-    # Only CSafeOpt has a gate threshold; SafeOpt/SafeUCB/GoSafeOpt have no eta_t.
     threshold_frames = []
     crossing_lines = []
     for name, (data, aquisition) in results.items():
@@ -441,9 +506,6 @@ def plot_bottleneck(results: dict, out_path: str):
         rounds_h, _tau_h, eta_h = zip(*history)
         threshold_frames.append(pd.DataFrame({"round": rounds_h, "value": eta_h, "name": name}))
 
-        # threshold_history[i] holds (round i+1, tau, eta); data.train_x[episode] is the point
-        # chosen using that round's threshold (episode 0 is the seed, not chosen via the gate at
-        # all, so episode e >= 1 was picked using threshold_history[e - 1]).
         chosen_x = data.train_x[:, 0].numpy()
         crossed_mask = chosen_x > VALLEY[1]
         if crossed_mask.any():
@@ -512,7 +574,6 @@ def alpha_ablation(
     alphas: List[float] = typer.Option([0.0, 0.5, 0.75, 1.0, 4.0], help="alpha values to compare for CSafeOpt"),
     out: str = f"{Path().absolute()}/examples/bottleneck_alpha_ablation.png",
 ):
-    """Same benchmark, same figure, but comparing CSafeOpt at different alpha instead of different algorithms."""
     Logger.set_verbosity(2)
 
     j_star = true_optimum()
@@ -534,6 +595,128 @@ def alpha_ablation(
         )
 
     plot_bottleneck(results, out)
+
+
+def _margin_sweep_worker(job: tuple) -> dict:
+    name, margin, seed, n_opt_samples, alpha, epsilon, normalize_output = job
+    torch.set_num_threads(1)
+    Logger.set_verbosity(0)
+    set_bottleneck_margin(margin)
+    CONFIG["model"]["normalize_output"] = normalize_output
+    data, _aquisition = run(name, seed, n_opt_samples, alpha=alpha, epsilon=epsilon)
+    chosen_x = data.train_x[:, 0].numpy()
+    reward = data.train_y[:, 0].numpy()
+    return {
+        "name": name,
+        "margin": margin,
+        "seed": seed,
+        "cumulative_regret": float((true_optimum() - reward).sum()),
+        "crossed": bool((chosen_x > VALLEY[1]).any()),
+        "max_constraint_violation": float(max(0.0, -data.train_y[:, 1].numpy().min())),
+    }
+
+
+def plot_margin_sweep(df: pd.DataFrame, out_path: str):
+    _apply_theme()
+
+    margins = sorted(df["margin"].unique(), reverse=True)
+    order = ["CSafeOpt", "SafeOpt", "SafeUCB", "GoOSE", "StageOpt", "ISE-BO"]
+    present = list(dict.fromkeys(df["name"]))
+    names = [n for n in order if n in present] + [n for n in present if n not in order]
+    style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
+
+    fig, (ax_landscape, ax_regret) = plt.subplots(1, 2, figsize=figsizes.iclr2023(nrows=1, ncols=2)["figure.figsize"])
+
+    xs = np.linspace(DOMAIN[0], DOMAIN[1], 400)
+    ax_landscape.plot(xs, reward_fn(xs), color=PALETTE[0], linewidth=1.6, label=r"$f(x)$")
+    for opacity, m in zip(np.linspace(0.25, 1.0, len(margins)), margins):
+        set_bottleneck_margin(m)
+        ax_landscape.plot(xs, constraint_fn(xs), color=PALETTE[7], alpha=opacity, linewidth=1.6, label=rf"$m={m:g}$")
+    ax_landscape.axhline(0.0, color="black", linestyle="--", linewidth=1.2)
+    ax_landscape.axvspan(*VALLEY, color="gainsboro", alpha=0.6, zorder=0)
+    ax_landscape.axvline(SEED_X, color="black", linestyle=":", linewidth=1.2)
+    ax_landscape.set_xlabel(r"$x$")
+    ax_landscape.set_ylabel("value")
+    ax_landscape.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=4, fontsize="x-small", frameon=False,
+                        handlelength=1.5, columnspacing=1.0)
+
+    summary = df.groupby(["name", "margin"])["cumulative_regret"].agg(["mean", "sem"]).reset_index()
+    positions = {m: i for i, m in enumerate(margins)}
+    for n in _draw_order(names):
+        sub = summary[summary["name"] == n].sort_values("margin", ascending=False)
+        pos = sub["margin"].map(positions).to_numpy()
+        mean, sem = sub["mean"].to_numpy(), np.nan_to_num(sub["sem"].to_numpy())
+        color, marker = style[n]
+        ax_regret.plot(pos, mean, color=color, marker=marker, markersize=4, linewidth=1.8)
+        ax_regret.fill_between(pos, mean - sem, mean + sem, color=color, alpha=0.2, linewidth=0)
+    ax_regret.set_xticks(range(len(margins)), [f"{m:g}" for m in margins])
+    ax_regret.set_xlabel(r"bottleneck margin $m$ (narrower $\rightarrow$)")
+    ax_regret.set_ylabel(r"cumulative regret $R_N$")
+    _legend(ax_regret, names, style, loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=4, fontsize="x-small", frameon=False,
+            handlelength=1.5, columnspacing=1.0)
+
+    for ax in fig.get_axes():
+        ax.grid(True, linewidth=0.5, c="gainsboro", zorder=0)
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.0)
+
+    fig.savefig(out_path)
+    pdf_path = str(Path(out_path).with_suffix(".pdf"))
+    fig.savefig(pdf_path)
+    plt.close(fig)
+    print(f"Saved margin sweep plot to {out_path} (and {pdf_path})")
+
+
+@app.command()
+def margin_sweep(
+    n_opt_samples: int = typer.Option(200, help="Number of BO rounds for every run"),
+    seeds: List[int] = typer.Option([0, 1, 2, 3, 4], help="RNG seeds; the plot shows mean +- standard error"),
+    margins: List[float] = typer.Option(
+        [0.5, 0.25, 0.1, 0.05, 0.025, 0.01], help="Bottleneck margins min_valley g(x), from wide to narrow"
+    ),
+    algorithms: List[str] = typer.Option(
+        ["CSafeOpt", "SafeOpt", "SafeUCB", "GoOSE", "StageOpt", "ISE-BO"],
+        help="Which acquisitions to run",
+    ),
+    epsilon: float = typer.Option(0.15, help="CSafeOpt's epsilon, also StageOpt's switching width and GoOSE's accuracy"),
+    alpha: float = typer.Option(
+        3.0, help="CSafeOpt's alpha, fixed across margins; large enough that its gate threshold tau_t keeps "
+        "shrinking below the narrowest margin"
+    ),
+    normalize_output: bool = typer.Option(False, help="Standardize the GP outputs (overrides CONFIG's default)"),
+    workers: int = typer.Option(8, help="Parallel worker processes (each peaks at ~1.5 GB)"),
+    from_csv: Optional[str] = typer.Option(None, help="Skip the runs and replot a CSV written by an earlier sweep"),
+    out: str = f"{Path().absolute()}/examples/bottleneck_margin_sweep.png",
+):
+    csv_path = str(Path(out).with_suffix(".csv"))
+    if from_csv is not None:
+        df = pd.read_csv(from_csv)
+        df = df[df["name"].isin(algorithms)]
+    else:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        jobs = [(name, m, seed, n_opt_samples, alpha, epsilon, normalize_output) for m in margins for name in algorithms for seed in seeds]
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            rows = []
+            for row in pool.map(_margin_sweep_worker, jobs):
+                rows.append(row)
+                print(
+                    f"[{len(rows)}/{len(jobs)}] {row['name']} m={row['margin']:g} seed={row['seed']}: "
+                    f"R_N={row['cumulative_regret']:.2f}, crossed={row['crossed']}",
+                    flush=True,
+                )
+        df = pd.DataFrame(rows)
+        df.to_csv(csv_path, index=False)
+        print(f"Saved raw results to {csv_path}")
+
+    summary = df.groupby(["name", "margin"]).agg(
+        regret=("cumulative_regret", "mean"), crossed=("crossed", "mean"),
+        violation=("max_constraint_violation", "max"),
+    )
+    print(summary.unstack("margin").round(2).to_string())
+
+    plot_margin_sweep(df, out)
 
 
 if __name__ == "__main__":

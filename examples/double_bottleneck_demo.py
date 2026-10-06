@@ -1,17 +1,3 @@
-"""A 1D safe-optimization benchmark with two sequential bottlenecks.
-
-Same idea as bottleneck_demo.py (a mediocre local optimum at the seed,
-reached-by-crossing-a-low-reward-but-safe-corridor), but chained twice: seed
--> bottleneck 1 -> a medium peak -> bottleneck 2 -> the best peak. Bottleneck
-2 is deliberately narrower and has a tighter safety margin than bottleneck 1,
-so crossing it requires the gate threshold to have shrunk further -- a
-sterner test of whether a given alpha schedule shrinks fast enough to reach
-the full comparator class in a fixed round budget (Section 6.5 of the
-write-up). Reuses the landscape-agnostic infrastructure (paper-style
-plotting, the Chowdhury-Gopalan confidence sequence, the instrumented
-CSafeOpt) directly from bottleneck_demo.py rather than duplicating it.
-"""
-
 import math
 import random
 from pathlib import Path
@@ -31,10 +17,13 @@ from bottleneck_demo import (
     MARKERS,
     PALETTE,
     GrowingGoose,
+    GrowingISEBO,
     GrowingGoSafeOpt,
     GrowingSafeOpt,
     GrowingSafeUCB,
+    StageOpt,
     InstrumentedCSafeOpt,
+    InstrumentedCSafeOptSimple,
     _apply_theme,
     _draw_order,
     _legend,
@@ -43,7 +32,9 @@ from bottleneck_demo import (
     _style_axis,
     reset_global_state,
 )
+from confidence_bounds import SCHEMATIC_FIGSIZE, plot_confidence_schematic
 from torch import Tensor
+from trajectories_3d import COLUMN_FIGSIZE, Landscape, plot_trajectories
 
 import gosafeopt
 from gosafeopt.aquisitions.base_aquisition import BaseAquisition
@@ -62,8 +53,8 @@ app = typer.Typer()
 SEED_X = 0.5
 MID_PEAK_X = 5.5
 FINAL_PEAK_X = 10.5
-BOTTLENECK_1 = (1.5, 4.0)  # same width/shape as the single-bottleneck benchmark
-BOTTLENECK_2 = (7.3, 9.0)  # same width as bottleneck 1; only the safety margin is tighter
+BOTTLENECK_1 = (1.5, 4.0)
+BOTTLENECK_2 = (7.3, 9.0)
 DOMAIN = (0.0, 12.0)
 
 
@@ -76,9 +67,9 @@ def reward_fn(x: np.ndarray) -> np.ndarray:
     )
 
 
-BOTTLENECK_2_DIP_CENTER = 8.87  # bottleneck 2's original minimizer
+BOTTLENECK_2_DIP_CENTER = 8.87
 BOTTLENECK_2_DIP_WIDTH = 1
-BOTTLENECK_2_DIP_AMPLITUDE = 0.1  # halves bottleneck 2's margin again (0.062 -> 0.031); negligible at bottleneck 1
+BOTTLENECK_2_DIP_AMPLITUDE = 0.1
 
 
 def constraint_fn(x: np.ndarray) -> np.ndarray:
@@ -101,8 +92,6 @@ class DoubleBottleneckEnv(Environment):
 
     def step(self, k):
         x = float(k[0])
-        # Experiment.rollout divides by len(trajectory) == 2 for a single-step
-        # episode; double the raw values so data.train_y matches reward_fn/constraint_fn.
         reward = np.array([2 * reward_fn(x), 2 * constraint_fn(x)])
         return np.array([x]), reward, True, False, {}
 
@@ -117,7 +106,7 @@ CONFIG = {
     "domain_start": [DOMAIN[0]],
     "domain_end": [DOMAIN[1]],
     "model": {
-        "lenghtscale": [0.4],  # must not exceed the narrowest true feature (the seed bump, width 0.35)
+        "lenghtscale": [0.4],
         "normalize_input": True,
         "normalize_output": True,
         "likelihood_noise": 1e-4,
@@ -126,19 +115,21 @@ CONFIG = {
         "set_size": 6000,
         "set_init": "random",
         "max_global_steps_without_progress_tolerance": 0.9,
-        "max_global_steps_without_progress": 10_000,  # effectively disabled
+        "max_global_steps_without_progress": 10_000,
     },
     "SafeOpt": {"scale_beta": 1.0, "beta": 9},
     "SafeUCB": {"scale_beta": 1.0, "beta": 9},
-    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1, "alpha": 0.75, "zeta": 0.1},
+    "CSafeOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1 / 3, "alpha": 1, "zeta": 0.01, "lipschitz": 0.5},
+    "CSafeOptSimple": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.3, "alpha": 0.51, "zeta": 0.0, "delta_f": 4.0},
     "GoSafeOpt": {"scale_beta": 1.0, "beta": 9, "n_max_local": 5, "n_max_global": 3},
-    # lipschitz=2.0 safely bounds constraint_fn's true max slope (~1.2, from the
-    # narrower width-0.45 bump at the final peak plus the dip term).
-    "GoOSE": {"scale_beta": 1.0, "beta": 9, "lipschitz": 0.5, "epsilon": 0.1},
+    "GoOSE": {"scale_beta": 1.0, "beta": 9, "lipschitz": 0.25, "epsilon": 0.1 / 3},
+    "StageOpt": {"scale_beta": 1.0, "beta": 9, "epsilon": 0.1 / 3},
+    "ISE-BO": {"scale_beta": 1.0, "beta": 9},
 }
 
 
-def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float] = None) -> BaseAquisition:
+def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float] = None,
+                     epsilon: Optional[float] = None) -> BaseAquisition:
     if name == "SafeOpt":
         return GrowingSafeOpt(**CONFIG["SafeOpt"], dim_obs=dim_obs)
     elif name == "SafeUCB":
@@ -147,23 +138,41 @@ def build_aquisition(name: str, dim_obs: int, data: Data, alpha: Optional[float]
         kwargs = dict(CONFIG["CSafeOpt"])
         if alpha is not None:
             kwargs["alpha"] = alpha
+        if epsilon is not None:
+            kwargs["epsilon"] = epsilon
         return InstrumentedCSafeOpt(**kwargs, dim_obs=dim_obs)
+    elif name == "CSafeOptSimple":
+        kwargs = dict(CONFIG["CSafeOptSimple"])
+        if alpha is not None:
+            kwargs["alpha"] = alpha
+        if epsilon is not None:
+            kwargs["epsilon"] = epsilon
+        return InstrumentedCSafeOptSimple(**kwargs, dim_obs=dim_obs)
     elif name == "GoSafeOpt":
         return GrowingGoSafeOpt(**CONFIG["GoSafeOpt"], dim_obs=dim_obs, data=data)
     elif name == "GoOSE":
         return GrowingGoose(**CONFIG["GoOSE"], dim_obs=dim_obs)
+    elif name == "StageOpt":
+        kwargs = dict(CONFIG["StageOpt"])
+        eta = kwargs.pop("epsilon")
+        return StageOpt(**kwargs, expansion_eta=eta, dim_obs=dim_obs)
+    elif name == "ISE-BO":
+        return GrowingISEBO(**CONFIG["ISE-BO"], dim_obs=dim_obs, data=data)
     else:
         raise ValueError(f"Unknown aquisition {name}")
 
 
-def run(name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None) -> tuple:
+def run(
+    name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None, initial_point: Optional[tuple] = None,
+    epsilon: Optional[float] = None,
+) -> tuple:
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     reset_global_state()
 
     data = Data()
-    x_safe = torch.tensor([[SEED_X]])
+    x_safe = torch.tensor([[SEED_X if initial_point is None else initial_point[0]]])
 
     environment = DoubleBottleneckEnv(render_mode=None)
     experiment = Experiment(CONFIG, environment, data=data, backup=None)
@@ -177,7 +186,7 @@ def run(name: str, seed: int, n_opt_samples: int, alpha: Optional[float] = None)
         data=data,
     )
 
-    aquisition = build_aquisition(name, CONFIG["dim_obs"], data, alpha=alpha)
+    aquisition = build_aquisition(name, CONFIG["dim_obs"], data, alpha=alpha, epsilon=epsilon)
 
     model = ModelGenerator(
         **CONFIG["model"],
@@ -214,12 +223,6 @@ def bottleneck_margin(bottleneck: tuple, resolution: int = 20_000) -> float:
 
 
 def _greedy_gamma_sequence(covar: gpytorch.kernels.Kernel, lam: float, grid_size: int, n_direct: int) -> torch.Tensor:
-    """gamma_n for n=1..n_direct via greedy (submodular, (1-1/e)-optimal) variance
-    maximization -- the standard tractable proxy for the true (NP-hard) maximum
-    information gain gamma_N := max_{|A|<=N} I(y_A; f_A) that Lemma 5 is stated for.
-    Operates on the normalized [0,1] input space, matching the model's own
-    Normalize() input_transform, so this uses exactly the kernel a real run sees.
-    """
     xs = torch.linspace(0.0, 1.0, grid_size, dtype=torch.float64).reshape(-1, 1)
     with torch.no_grad():
         k = covar(xs).evaluate().double()
@@ -242,11 +245,6 @@ def _greedy_gamma_sequence(covar: gpytorch.kernels.Kernel, lam: float, grid_size
 
 
 def _fit_gamma_extrapolation(gamma_seq: torch.Tensor):
-    """Fit gamma_n ~= a + b * n^(1/6) * log(n)^(5/6), the known asymptotic rate for
-    a Matern-5/2 kernel on a 1D domain (Srinivas et al. 2012 / Vakili et al.), on the
-    back half of the directly-computed sequence, so gamma (and hence Nbar) can be
-    evaluated for n far beyond what's tractable to compute exactly.
-    """
     n_total = len(gamma_seq)
     fit_from = max(n_total // 2, 10)
     ns = np.arange(fit_from, n_total + 1)
@@ -265,10 +263,6 @@ def _fit_gamma_extrapolation(gamma_seq: torch.Tensor):
 
 
 def _solve_nbar(gamma_fn, beta_fn, C_lambda: float, m_star: float, hi_cap: float = 1e12):
-    """Smallest n >= 1 with n >= 4*C_lambda*beta_n*gamma_n / m_star^2 (Lemma 5's
-    budget argument): beyond this n, some round t<=n is guaranteed to have already
-    certified a point within margin m_star, regardless of how the points were chosen.
-    """
 
     def rhs(n: float) -> float:
         gamma = gamma_fn(max(int(round(n)), 1))
@@ -290,16 +284,7 @@ def _solve_nbar(gamma_fn, beta_fn, C_lambda: float, m_star: float, hi_cap: float
     return hi, rhs(hi)
 
 
-def plot_double_bottleneck(results: dict, out_path: str):
-    _apply_theme()
-
-    names = _legend_order(list(results.keys()))
-    style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
-    j_star = true_optimum()
-
-    fig, ((ax_landscape, ax_trace), (ax_regret, ax_threshold)) = plt.subplots(2, 2)
-
-    # --- landscape -----------------------------------------------------
+def _plot_landscape_and_trace(ax_landscape, ax_trace, results: dict, names: list, style: dict) -> None:
     xs = np.linspace(DOMAIN[0], DOMAIN[1], 800)
     landscape_df = pd.DataFrame(
         {
@@ -323,7 +308,6 @@ def plot_double_bottleneck(results: dict, out_path: str):
     ax_landscape.set_title("True reward / constraint landscape")
     _legend(ax_landscape, curve_names, {curve_names[0]: (PALETTE[0], None), curve_names[1]: (PALETTE[7], None)})
 
-    # --- trace -----------------------------------------------------------
     trace_df = pd.concat(
         [
             pd.DataFrame({"round": np.arange(data.train_x.shape[0]), "chosen_x": data.train_x[:, 0].numpy(), "name": n})
@@ -339,7 +323,25 @@ def plot_double_bottleneck(results: dict, out_path: str):
     ax_trace.set_title("Point evaluated per round")
     _legend(ax_trace, names, style)
 
-    # --- cumulative regret -------------------------------------------------
+
+def _landscape(j_star: float) -> Landscape:
+    return Landscape(
+        domain=DOMAIN,
+        reward=reward_fn,
+        constraint=constraint_fn,
+        j_star=j_star,
+        crossings=(BOTTLENECK_1[1], BOTTLENECK_2[1]),
+        strips=((*BOTTLENECK_1, "gainsboro", "bottleneck"), (*BOTTLENECK_2, "gainsboro", "bottleneck")),
+        z_ticks=(0, 2),
+    )
+
+
+def _plot_regret_and_threshold(ax_regret, ax_threshold, results: dict, names: list, style: dict, j_star: float,
+                               narrow: bool = False, show_legend: bool = True, show_margins: bool = False,
+                               threshold_legend: bool = True) -> None:
+    n_rounds = max(data.train_y.shape[0] for data, _aq in results.values())
+    series_style = {"marker_step": max(5, n_rounds // 20), "pointsize": 3.0} if narrow else {}
+
     regret_df = pd.concat(
         [
             pd.DataFrame(
@@ -353,13 +355,16 @@ def plot_double_bottleneck(results: dict, out_path: str):
         ],
         ignore_index=True,
     )
-    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", _draw_order(names), style)
+    _plot_series(ax_regret, regret_df, "round", "cumulative_regret", _draw_order(names), style, **series_style)
     ax_regret.set_xlabel("round")
     ax_regret.set_ylabel(r"cumulative regret $R_N$")
-    ax_regret.set_title(rf"$R_N = \sum_t (J^\star - f(x_t))$, $J^\star = {j_star:.3f}$")
-    _legend(ax_regret, names, style)
+    ax_regret.set_title(
+        rf"$J^\star = {j_star:.3f}$" if narrow
+        else rf"$R_N = \sum_t (J^\star - f(x_t))$, $J^\star = {j_star:.3f}$"
+    )
+    if show_legend:
+        _legend(ax_regret, names, style)
 
-    # --- gate threshold (eta_t) -------------------------------------------
     threshold_frames = []
     crossing_lines = []
     for name, (data, aquisition) in results.items():
@@ -369,36 +374,127 @@ def plot_double_bottleneck(results: dict, out_path: str):
         rounds_h, _tau_h, eta_h = zip(*history)
         threshold_frames.append(pd.DataFrame({"round": rounds_h, "value": eta_h, "name": name}))
 
-        chosen_x = data.train_x[:, 0].numpy()
-        for bottleneck in (BOTTLENECK_1, BOTTLENECK_2):
-            crossed_mask = chosen_x > bottleneck[1]
-            if crossed_mask.any():
-                first_cross_episode = int(np.argmax(crossed_mask))
-                if first_cross_episode >= 1:
-                    crossing_lines.append((name, first_cross_episode, history[first_cross_episode - 1][2]))
+        crossed_mask = data.train_x[:, 0].numpy() > BOTTLENECK_2[1]
+        if crossed_mask.any():
+            crossing_lines.append((name, int(np.argmax(crossed_mask))))
 
     if threshold_frames:
         threshold_df = pd.concat(threshold_frames, ignore_index=True)
         gate_names = [n for n in names if n in threshold_df["name"].unique()]
-        _plot_series(ax_threshold, threshold_df, "round", "value", _draw_order(gate_names), style, pointsize=3.5)
+        _plot_series(
+            ax_threshold, threshold_df, "round", "value", _draw_order(gate_names), style,
+            **{"pointsize": 3.5, **series_style},
+        )
 
-        for name, _first_cross_episode, eta_at_crossing in crossing_lines:
-            ax_threshold.axhline(eta_at_crossing, color=style[name][0], linestyle="-.", linewidth=1.6, alpha=0.7)
+        for name, first_cross_round in crossing_lines:
+            ax_threshold.axvline(first_cross_round, color=style[name][0], linestyle="-.", linewidth=1.2, alpha=0.8)
 
-        _legend(ax_threshold, gate_names, style)
+        if show_legend:
+            _legend(ax_threshold, gate_names, style)
+
+    if show_margins:
+        for label, bottleneck in [(r"$m_1$", BOTTLENECK_1), (r"$m_2$", BOTTLENECK_2)]:
+            margin = bottleneck_margin(bottleneck)
+            ax_threshold.axhline(margin, color="black", linestyle="--", linewidth=1.0, alpha=0.7, zorder=1)
+            ax_threshold.annotate(
+                label, (1.0, margin), xycoords=("axes fraction", "data"), xytext=(-3, 2), textcoords="offset points",
+                ha="right", va="bottom", fontsize="small",
+            )
+        top = max(ax_threshold.get_ylim()[1], bottleneck_margin(BOTTLENECK_1))
+        ax_threshold.set_ylim(0.0, 1.15 * top)
+    legend = ax_threshold.get_legend()
+    if not threshold_legend and legend is not None:
+        legend.remove()
 
     ax_threshold.set_xlabel("round")
     ax_threshold.set_ylabel(r"$\eta_t$")
     ax_threshold.set_title(r"$\eta_t = 2\varepsilon\,\beta_t^{1/2-\alpha}$")
 
-    for ax in fig.get_axes():
-        _style_axis(ax)
+
+def plot_double_bottleneck(
+    results: dict, out_path: str, trajectories_3d: bool = False, narrow: bool = False,
+    confidence_schematic: bool = False, squeezed: bool = False, regret_threshold_only: bool = False,
+    show_margins: bool = False,
+):
+    narrow = narrow or confidence_schematic
+    _apply_theme()
+
+    names = _legend_order(list(results.keys()))
+    style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
+    j_star = true_optimum()
+
+    if regret_threshold_only:
+        width, height = plt.rcParams["figure.figsize"]
+        fig, (ax_regret, ax_threshold) = plt.subplots(1, 2, figsize=(width, 0.5 * height))
+    elif confidence_schematic:
+        n_rounds = max(data.train_x.shape[0] for data, _aq in results.values())
+        fig = plt.figure(figsize=SCHEMATIC_FIGSIZE)
+        top, bottom = fig.subfigures(2, 1, height_ratios=[2.1, 1])
+        plot_confidence_schematic(
+            top, CONFIG, build_aquisition, results, names, style, _landscape(j_star), (5, n_rounds // 2, n_rounds)
+        )
+        ax_regret, ax_threshold = bottom.subplots(1, 2)
+    elif trajectories_3d and squeezed and not narrow:
+        width, height = plt.rcParams["figure.figsize"]
+        fig = plt.figure(figsize=(width, 0.9 * height))
+        top, bottom = fig.subfigures(2, 1, height_ratios=[1.38, 1])
+        plot_trajectories(top, results, names, style, _landscape(j_star), panel_span=(0.09, 0.74), zoom=1.06,
+                          sparse=True)
+        ax_regret, ax_threshold = bottom.subplots(1, 2)
+    elif trajectories_3d:
+        width, height = plt.rcParams["figure.figsize"]
+        fig = plt.figure(figsize=COLUMN_FIGSIZE if narrow else (width, 1.11 * height))
+        top, bottom = fig.subfigures(2, 1, height_ratios=[1.8, 1] if narrow else [1.65, 1])
+        plot_trajectories(top, results, names, style, _landscape(j_star), compact=narrow)
+        ax_regret, ax_threshold = bottom.subplots(1, 2)
+    else:
+        fig, ((ax_landscape, ax_trace), (ax_regret, ax_threshold)) = plt.subplots(2, 2)
+        _plot_landscape_and_trace(ax_landscape, ax_trace, results, names, style)
+
+    _plot_regret_and_threshold(ax_regret, ax_threshold, results, names, style, j_star, narrow=narrow,
+                               show_legend=regret_threshold_only or not (trajectories_3d or confidence_schematic),
+                               show_margins=show_margins,
+                               threshold_legend=not regret_threshold_only)
+
+    for ax in [ax_regret, ax_threshold] if confidence_schematic else fig.get_axes():
+        if ax.name != "3d":
+            _style_axis(ax)
 
     fig.savefig(out_path)
     pdf_path = str(Path(out_path).with_suffix(".pdf"))
     fig.savefig(pdf_path)
     plt.close(fig)
     print(f"Saved double-bottleneck plot to {out_path} (and {pdf_path})")
+
+
+def plot_epsilon_alpha_grid(blocks: list, out_path: str) -> None:
+    _apply_theme()
+    j_star = true_optimum()
+    width, height = plt.rcParams["figure.figsize"]
+    legend_height = 0.12
+    block_height = 0.82 * height
+    fig = plt.figure(figsize=(width, block_height * len(blocks) + legend_height * height))
+    ratios = [block_height + legend_height * height] + [block_height] * (len(blocks) - 1)
+    for index, (block, (label, results)) in enumerate(zip(fig.subfigures(len(blocks), 1, height_ratios=ratios),
+                                                            blocks)):
+        names = list(results.keys())
+        style = {n: (PALETTE[i % len(PALETTE)], MARKERS[i % len(MARKERS)]) for i, n in enumerate(names)}
+        first = index == 0
+        top, bottom = block.subfigures(2, 1, height_ratios=[1.2 + (0.25 if first else 0.0), 1])
+        span = (0.1, 0.76) if first else (0.1, 0.92)
+        plot_trajectories(top, results, names, style, _landscape(j_star), panel_span=span, zoom=1.06,
+                          sparse=True, legend=first)
+        ax_regret, ax_threshold = bottom.subplots(1, 2)
+        _plot_regret_and_threshold(ax_regret, ax_threshold, results, names, style, j_star, show_legend=False)
+        for ax in (ax_regret, ax_threshold):
+            _style_axis(ax)
+        top.text(0.004, span[0] + span[1] / 2, label, rotation=90, ha="left",
+                 va="center", fontsize=10)
+    fig.savefig(out_path)
+    pdf_path = str(Path(out_path).with_suffix(".pdf"))
+    fig.savefig(pdf_path)
+    plt.close(fig)
+    print(f"Saved epsilon x alpha ablation to {out_path} (and {pdf_path})")
 
 
 def _print_summary(name: str, data, j_star: float):
@@ -422,6 +518,11 @@ def bottleneck(
         ["SafeOpt", "SafeUCB", "CSafeOpt", "GoOSE"], help="Which acquisitions to run"
     ),
     out: str = f"{Path().absolute()}/examples/double_bottleneck.png",
+    trajectories_3d: bool = typer.Option(False, help="Replace the landscape/trace panels by one 3D panel per run"),
+    narrow: bool = typer.Option(False, help="Size the figure for one column of a two-column page"),
+    confidence_schematic: bool = typer.Option(
+        False, help="Replace the landscape/trace panels by schematic confidence bounds (half-page format)"
+    ),
 ):
     Logger.set_verbosity(2)
     j_star = true_optimum()
@@ -432,17 +533,36 @@ def bottleneck(
         results[name] = (data, aquisition)
         _print_summary(name, data, j_star)
 
-    plot_double_bottleneck(results, out)
+    plot_double_bottleneck(
+        results, out, trajectories_3d=trajectories_3d, narrow=narrow, confidence_schematic=confidence_schematic
+    )
+
+
+def _epsilon_for_eta0(algorithm: str, seed: int, alpha: float, eta0: float, tol: float = 1e-4) -> float:
+    epsilon = CONFIG[algorithm]["epsilon"]
+    for _ in range(10):
+        _data, aquisition = run(algorithm, seed, 3, alpha=alpha, epsilon=epsilon)
+        eta1 = aquisition.threshold_history[0][2]
+        if abs(eta1 / eta0 - 1.0) < tol:
+            break
+        epsilon *= eta0 / eta1
+    print(f"alpha={alpha:g}: epsilon={epsilon:.6g} gives eta_1={eta1:.6g} (target {eta0:g})", flush=True)
+    return epsilon
 
 
 @app.command()
 def alpha_ablation(
     n_opt_samples: int = typer.Option(100, help="Number of BO rounds for every run"),
     seed: int = typer.Option(42, help="RNG seed shared by every run"),
-    alphas: List[float] = typer.Option([0.5, 0.6, 0.7, 0.75, 0.8, 1], help="alpha values to compare for CSafeOpt"),
+    alphas: List[float] = typer.Option([0.5, 0.75, 1], help="alpha values to compare"),
+    algorithm: str = typer.Option("CSafeOpt", help="Which acquisition to ablate over alpha (CSafeOpt or CSafeOptSimple)"),
     out: str = f"{Path().absolute()}/examples/double_bottleneck_alpha_ablation.png",
+    eta0: Optional[float] = typer.Option(
+        None, min=1e-12, help="Choose epsilon per alpha so every run starts at the same threshold eta_1 = eta0"
+    ),
+    regret_threshold_only: bool = typer.Option(False, help="Only the regret and eta_t panels (no samples)"),
+    show_margins: bool = typer.Option(False, help="With --regret-threshold-only: bottleneck margins on eta_t"),
 ):
-    """Same benchmark, same figure, but comparing CSafeOpt at different alpha instead of different algorithms."""
     Logger.set_verbosity(2)
     j_star = true_optimum()
 
@@ -450,11 +570,42 @@ def alpha_ablation(
     for a in alphas:
         plain_name = f"alpha={a:g}"
         name = rf"$\alpha={a:g}$"
-        data, aquisition = run("CSafeOpt", seed, n_opt_samples, alpha=a)
+        epsilon = _epsilon_for_eta0(algorithm, seed, a, eta0) if eta0 is not None else None
+        data, aquisition = run(algorithm, seed, n_opt_samples, alpha=a, epsilon=epsilon)
         results[name] = (data, aquisition)
         _print_summary(plain_name, data, j_star)
 
-    plot_double_bottleneck(results, out)
+    if regret_threshold_only:
+        plot_double_bottleneck(results, out, regret_threshold_only=True, show_margins=show_margins)
+    else:
+        plot_double_bottleneck(results, out, trajectories_3d=True, squeezed=True)
+
+
+@app.command()
+def epsilon_ablation(
+    n_opt_samples: int = typer.Option(100, help="Number of BO rounds for every run"),
+    seed: int = typer.Option(42, help="RNG seed shared by every run"),
+    alphas: List[float] = typer.Option([0.75, 1, 1.25], help="alpha values, one stacked block each (top to bottom)"),
+    epsilons: List[float] = typer.Option([0.15, 0.1, 0.04], help="epsilon values, one column (and colour) each"),
+    out: str = f"{Path().absolute()}/examples/double_bottleneck_epsilon_ablation_3d.png",
+):
+    Logger.set_verbosity(2)
+    j_star = true_optimum()
+    original = dict(CONFIG["CSafeOpt"])
+    CONFIG["CSafeOpt"].pop("lipschitz", None)
+    try:
+        blocks = []
+        for a in alphas:
+            results = {}
+            for epsilon in epsilons:
+                data, aquisition = run("CSafeOpt", seed, n_opt_samples, alpha=a, epsilon=epsilon)
+                results[rf"$\varepsilon={epsilon:g}$"] = (data, aquisition)
+                _print_summary(f"alpha={a:g}, epsilon={epsilon:g}", data, j_star)
+            blocks.append((rf"$\alpha={a:g}$", results))
+    finally:
+        CONFIG["CSafeOpt"].clear()
+        CONFIG["CSafeOpt"].update(original)
+    plot_epsilon_alpha_grid(blocks, out)
 
 
 @app.command()
@@ -462,14 +613,6 @@ def nbar(
     grid_size: int = typer.Option(4000, help="Grid resolution (in normalized [0,1] space) for the gamma_n estimate"),
     n_direct: int = typer.Option(8000, help="Compute gamma_n exactly (via greedy selection) up to this many points"),
 ):
-    """Nbar = min{n >= 1 : n >= 4*C_lambda*beta_n*gamma_n / (m*)^2} for both bottlenecks
-    (Lemma 5's information-gain budget): the worst-case number of rounds guaranteed to
-    contain a round that already certified a point within that bottleneck's margin,
-    regardless of which algorithm or points were actually chosen. Uses the exact same
-    kernel/lengthscale/noise CONFIG uses, and CSafeOpt's own rkhs_bound/noise_proxy/delta.
-    gamma_n is computed exactly up to n_direct via greedy (near-optimal) selection, then
-    extrapolated with the Matern-5/2-in-1D asymptotic rate for any larger n the solve needs.
-    """
     Logger.set_verbosity(1)
 
     lam = CONFIG["model"]["likelihood_noise"]

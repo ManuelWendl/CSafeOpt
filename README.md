@@ -1,7 +1,5 @@
 # Cumulative SafeOpt -- No Regret Safe Bayesian Optimization
 
-![Bayesian Optimization animation](/doc/animation.gif?raw=true "Bayesian optimization animation")
-
 This repository contains the code for the gated exploration mechanism CSafeOpt. 
 
 ## Setup
@@ -18,11 +16,38 @@ pip install -e .
 
 It might be necessary to create a wandb account at wandb.ai if not already existing.
 
-## Examples
+## Statistical evaluation
 
-To master the mars exploration problem with the gated aquisition function and comparison to all baselines, run the following commands:
+The statistical evaluation compares CSafeOpt with CSafeOptSimple, SafeOpt, SafeUCB, GoOSE, ISE-BO and StageOpt over 10 safe initial configurations per benchmark. All results and the figure are written to `examples/statistical_evaluation/`. Install the example dependencies first:
 
 ```
 poetry install --with examples
-python examples/mars_demo.py
+```
+
+**1. Double bottleneck, mirage, mountain car and pendulum** (10 starts within 0.1 of the domain width around each benchmark's nominal safe seed; 100, 200, 200 and 800 rounds):
+
+```
+python examples/multistart.py \
+  --benchmarks double_bottleneck --benchmarks mirage --benchmarks mountaincar --benchmarks pendulum \
+  --algorithms CSafeOpt --algorithms CSafeOptSimple --algorithms SafeOpt --algorithms SafeUCB \
+  --algorithms GoOSE --algorithms ISE-BO --algorithms StageOpt \
+  --out-dir examples/statistical_evaluation
+```
+
+**2. Mars** (10 landing sites within 2 m of the nominal landing site, 400 rounds). The first command samples the landing sites and runs CSafeOpt; the second runs the baselines at the same sites (each Mars run needs about 9 GB of memory, so lower `--jobs` if necessary):
+
+```
+python examples/mars_demo.py random-landings --algorithms CSafeOpt \
+  --out examples/statistical_evaluation/mars.png
+python examples/mars_demo.py random-landings-extend --out examples/statistical_evaluation/mars.png \
+  --algorithms CSafeOptSimple --algorithms SafeOpt --algorithms SafeUCB --algorithms GoOSE \
+  --algorithms ISE-BO --algorithms StageOpt --jobs 4
+```
+
+**3. Figure** (mean cumulative regret with one standard error over the starts):
+
+```
+python examples/multistart_bars.py --results-dir examples/statistical_evaluation \
+  --replace mars_near_nominal=examples/statistical_evaluation/mars.csv \
+  --out examples/statistical_evaluation/regret_bars.png
 ```
